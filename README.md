@@ -1,295 +1,357 @@
-# 🏛️ 古罗马水道工程结构健康与现代修复评估系统
+# 古罗马水道工程结构健康与现代修复评估系统
 
-Aqueduct Structural Health Monitoring & Modern Rehabilitation Decision Support System
+## 1. 系统架构
 
-某考古工程团队对古罗马11条水道的现存遗迹进行了详细测绘，每条水道布设了结构应力传感器和位移计（模拟定期上传），每1小时通过4G DTU上报拱券应力、砂浆风化深度、基础沉降量等数据。
-
----
-
-## ✨ 系统功能特性
-
-### 1. 数据采集层
-- **4G DTU数据上报接口**：支持批量传感器读数提交，带质量标识和信号强度RSSI
-- **传感器类型**：应力计(MPa)、风化深度(mm)、沉降计(mm)、倾角计(°)、温湿度计
-- **时序数据存储**：TimescaleDB超表 + 7天自动分区 + 日/小时连续聚合视图
-
-### 2. 结构健康监测可视化（Three.js + Canvas）
-- **11条水道三维重建**：参数化桥墩（基座+柱身+柱头）、半圆拱券（分块楔形石）、明渠水槽
-- **动态着色映射**：
-  - 🟢→🔴 风化深度配色（0mm ~ 40mm+）
-  - 按承载力剩余比例（SAFE/WARNING/DANGER/CRITICAL）配色
-- **Canvas辅助**：小地图顶视图、趋势折线图（近1年，支持应力/风化/沉降）
-- **交互**：悬停提示、点击结构段弹出详细面板、轨道控制/线框模式切换
-
-### 3. 结构安全评估模型
-基于**有限元简化模型 (Simplified FEA)** + **材料退化曲线**：
-
-#### 三维结构建模
+**系统全景图：**
 ```
-桥墩：6节点空间框架（2段柱身+横向联系梁），1.2m × 2.5m截面
-拱券：9节点抛物线拱轴线，8梁单元 + 分段楔形石体积模型
+                        ┌───────────────────┐
+                        │   传感器模拟器     │
+                        │  (11条水道/小时级) │
+                        └─────────┬─────────┘
+                                  │ DTU 4G HTTP
+                                  ▼
+                        ┌───────────────────┐
+                        │   Go 后端服务      │◄── Prometheus 指标
+                        │  ┌──────────────┐ │
+                        │  │ dtu_receiver │ │  (pprof /metrics)
+                        │  └──────┬───────┘ │
+                        │         │  chan   │
+                        │  ┌──────▼───────┐ │
+                        │  │ structural_  │ │
+                        │  │  evaluator   │ │  FEA 三铰拱+自适应网格
+                        │  └──────┬───────┘ │
+                        │         │  chan   │
+                        │  ┌──────▼───────┐ │
+                        │  │ repair_      │ │
+                        │  │  advisor     │ │  TOPSIS+KNN+灵敏度
+                        │  └──────┬───────┘ │
+                        │         │  chan   │
+                        │  ┌──────▼───────┐ │
+                        │  │ alarm_       │ │
+                        │  │  publisher   │ │  MQTT+离线队列+退避
+                        │  └──────┬───────┘ │
+                        └─────────┼─────────┘
+                                  │ MQTT
+                                  ▼
+                        ┌───────────────────┐
+                        │ Mosquitto MQTT    │───► 文物保护中心
+                        └───────────────────┘
+                                  ▲
+                                  │ 查询
+                        ┌───────────────────┐
+                        │  前端三维可视化    │
+                        │  (Three.js+LOD)   │
+                        └───────────────────┘
 ```
 
-#### 承载力计算因子
-- **风化退化**：截面损失率 → 强度折减（幂函数 1.3 次方）
-- **沉降影响**：差异沉降 → 倾斜偏心 → 附加弯曲应力
-- **老化因子**：2000年服役寿命指数衰减
-- **应力集中**：拱脚/铰区 1.15x ~ 1.6x 放大
+**模块说明：**
+- **dtu_receiver**: DTU传感器数据接收、验证、批量入库
+- **structural_evaluator**: 三铰拱有限元分析 + 自适应网格 + 承载力计算
+- **repair_advisor**: TOPSIS多属性决策 + KNN数据补全 + 灵敏度分析
+- **alarm_publisher**: MQTT告警推送 + 离线队列 + 指数退避
 
-#### 五级预警机制
-| 安全等级 | 承载力比值 | 触发响应 |
-|---------|----------|---------|
-| SAFE | ≥80% | 常规监测 |
-| WARNING | ≥65% | 加强巡检 |
-| DANGER | ≥50% | 列入年度加固计划 |
-| CRITICAL | <50% | **紧急加固 + 封闭交通** |
+**数据存储：**
+- TimescaleDB: 传感器时序数据 + 压缩策略（30天自动压缩）
+- 连续聚合: 小时级、日级聚合视图
 
-### 4. 修复方案推荐引擎（TOPSIS多属性决策）
-基于**古罗马传统配方**（石灰-火山灰-碎砖三元体系）和**现代材料库**（11种）：
+## 2. 快速开始
 
-#### 古罗马混凝土配方
-| 配方 | 石灰：火山灰：骨料 | 抗压强度 | 适用场景 |
-|------|-----------------|---------|---------|
-| 标准A | 1:2:4 | 20.5 MPa | 普通结构修复 |
-| 高强度B | 1:1.5:3 | 28.8 MPa | 承重结构 |
-| 水下C | 1.5:1:2(浮石) | 24.0 MPa | 基础/潮湿区 |
+### 2.1 环境要求
+- Docker 24.0+
+- Docker Compose 2.20+
+- 至少 4GB RAM，推荐 8GB RAM
 
-#### MADM决策属性权重（文物保护场景自动调整）
-| 属性 | 基准权重 | 承重关键 | 文物优先 |
-|-----|---------|---------|---------|
-| 抗压强度 | 12% | +8% | — |
-| 抗拉强度 | 10% | +6% | — |
-| 耐久性 | 15% | +3% | — |
-| **原结构相容性** | 18% | — | **+7%** |
-| **美学匹配** | 14% | — | **+6%** |
-| **环境影响** | 7% | — | +4% |
-| 成本/施工便捷 | 18% | — | — |
+### 2.2 一键启动（核心服务）
+```bash
+cd AI_solo_coder_task_A_080
+docker compose up -d
+```
 
-> 遵循《威尼斯宪章》最小干预原则，古罗马/石灰材料自动附加+12%/+8%遗产友好加成
+等待服务启动，访问：
+- 前端界面: http://localhost:8080
+- API 健康检查: http://localhost:8080/api/health
+- pprof 调试: http://localhost:8080/debug/pprof
+- Prometheus 指标: http://localhost:8080/metrics
 
-### 5. 告警与MQTT推送
-- **7类告警**：沉降超限、应力超限、风化加速、倾角超限、承载力不足、传感器离线、设备故障
-- **MQTT分级主题**：`aqueduct/alerts/{严重级别}/{水道ID}/{告警类型}`
-- **QoS=1** + 持久会话 + CRITICAL自动RETAIN
-- 兼容MQTT Explorer可视化（Docker内置4000端口）
+### 2.3 启动传感器模拟器
+```bash
+docker compose --profile simulator up -d simulator
+```
 
----
+### 2.4 启动监控工具（Prometheus + MQTT Explorer）
+```bash
+docker compose --profile monitoring up -d
+```
 
-## 📁 项目结构
+访问：
+- Prometheus: http://localhost:9090
+- MQTT Explorer: http://localhost:4000
+
+### 2.5 停止服务
+```bash
+# 停止所有服务
+docker compose down
+
+# 停止含可选服务
+docker compose --profile simulator --profile monitoring down
+
+# 清理数据（谨慎使用）
+docker compose down -v
+```
+
+## 3. 传感器模拟器用法
+
+### 3.1 命令行参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `-aqueducts` | string | `all` | 要模拟的水道ID列表，逗号分隔 |
+| `-interval` | int | `3600` | 上报间隔秒数（默认1小时） |
+| `-backfill-days` | int | `365` | 历史回填天数 |
+| `-inject-weathering` | float | `1.0` | 全局风化速率倍率注入 |
+| `-inject-deformation` | float | `1.0` | 全局变形倍率注入 |
+| `-seed` | int | `42` | 随机种子 |
+| `-api-base` | string | `http://backend:8080/api` | 后端API地址 |
+| `-realtime` | bool | `true` | 是否启动实时模拟 |
+| `-list-aqueducts` | bool | `false` | 列出所有可用水道后退出 |
+
+### 3.2 常用场景
+
+**列出所有水道：**
+```bash
+docker run --rm aqueduct-simulator -list-aqueducts
+```
+
+**只模拟特定水道，回填30天：**
+```bash
+docker run --rm aqueduct-simulator -aqueducts "aq-001,aq-002" -backfill-days 30 -realtime=false
+```
+
+**注入高风化高变形的极端场景：**
+```bash
+docker run --rm aqueduct-simulator -inject-weathering 3.0 -inject-deformation 4.0 -seed 123
+```
+
+**加速模拟（15分钟间隔）：**
+```bash
+docker run --rm aqueduct-simulator -interval 900
+```
+
+### 3.3 11条水道独立配置
+
+每条水道有独立的：
+- 基准应力、位移、风化、沉降值
+- 独立的异常事件概率
+- 独立的传感器配置（6-12个监测点/水道）
+
+可通过修改 simulator/main.go 中的 `initAqueductConfigs()` 进行定制。
+
+## 4. 监控与性能调优
+
+### 4.1 Prometheus 关键指标
+
+| 指标名 | 说明 |
+|---|---|
+| `aqueduct_dtu_received_total` | 接收的DTU读数总数 |
+| `aqueduct_eval_processed_total` | 完成的结构评估数 |
+| `aqueduct_eval_duration_seconds` | 评估耗时直方图 |
+| `aqueduct_fea_nonconverge_total` | FEA不收敛次数 |
+| `aqueduct_alerts_published_total` | 发布的告警总数 |
+| `aqueduct_alerts_buffered` | 离线队列当前大小 |
+| `aqueduct_pipeline_queue_size` | 各阶段channel队列大小 |
+| `aqueduct_sensor_value` | 最新传感器值 |
+| `aqueduct_http_request_duration_seconds` | HTTP请求耗时 |
+
+**Grafana 监控大盘推荐查询：**
+```
+# 评估吞吐量
+rate(aqueduct_eval_processed_total[5m])
+
+# FEA收敛失败率
+rate(aqueduct_fea_nonconverge_total[1h]) / rate(aqueduct_eval_processed_total[1h])
+
+# 管道队列堆积
+aqueduct_pipeline_queue_size{stage="eval"}
+```
+
+### 4.2 pprof 性能分析
+
+**采集 CPU profile 30秒：**
+```bash
+go tool pprof http://localhost:8080/debug/pprof/profile?seconds=30
+```
+
+**采集内存 heap：**
+```bash
+go tool pprof http://localhost:8080/debug/pprof/heap
+```
+
+**采集 goroutine：**
+```bash
+go tool pprof http://localhost:8080/debug/pprof/goroutine
+```
+
+**查看火焰图：**
+```bash
+go tool pprof -http=:8081 profile.pprof
+```
+
+### 4.3 TimescaleDB 压缩策略
+
+```sql
+-- 查看压缩设置
+SELECT hypertable_name, compression_state FROM timescaledb_information.hypertables;
+
+-- 查看压缩块比例
+SELECT 
+  h.hypertable_name,
+  (SELECT count(*) FROM show_chunks(h.hypertable_name)) AS total_chunks,
+  (SELECT count(*) FROM show_chunks(h.hypertable_name, older_than => INTERVAL '30 days')) AS compressible_chunks,
+  (SELECT count(*) FROM timescaledb_information.chunks c 
+   WHERE c.hypertable_name = h.hypertable_name AND c.is_compressed) AS compressed_chunks
+FROM timescaledb_information.hypertables h;
+
+-- 手动压缩测试
+SELECT compress_chunk(i, if_not_exists => TRUE)
+FROM show_chunks('sensor_data', older_than => INTERVAL '7 days') i;
+
+-- 修改压缩阈值
+SELECT alter_job((SELECT job_id FROM timescaledb_information.jobs 
+   WHERE proc_name = 'policy_compression' AND hypertable_name = 'sensor_data'),
+   schedule_interval => INTERVAL '24 hours',
+   config => '{"compress_after": "60 days"}');
+```
+
+### 4.4 前端 Gzip 压缩
+
+后端已启用 gin-contrib/gzip 中间件，对所有静态资源和API响应自动压缩：
+- 静态资源 (JS/CSS/HTML): 压缩率 ~70-85%
+- API JSON 响应: 压缩率 ~60-75%
+
+可通过浏览器开发者工具 Network 面板查看 `Content-Encoding: gzip` 验证。
+
+## 5. 模型参数配置
+
+所有模型参数已外置到 `backend/.env`，可通过环境变量覆盖：
+
+### 5.1 FEA 有限元参数
+```
+FEA_MAX_ITERATIONS=50              # Newton-Raphson最大迭代次数
+FEA_TOLERANCE=0.0001                # 收敛容差
+FEA_RELAXATION=0.5                  # 松弛因子
+FEA_MIN_ELEMENTS=6                  # 自适应网格最小单元数
+FEA_MAX_ELEMENTS=32                 # 自适应网格最大单元数
+FEA_CURVATURE_THRESH=0.15           # 曲率细分阈值
+FEA_BASE_CONCRETE_FY=15.0           # 混凝土基准强度 MPa
+FEA_WEATHERING_POWER=1.3            # 风化截面损失幂次
+FEA_AQUEDUCT_AGE=2000               # 水道服役年限
+```
+
+### 5.2 MADM 多属性决策参数
+```
+MADM_KNN_NEIGHBORS=3                # K近邻补全K值
+MADM_MISSING_PENALTY=0.7            # 缺失权重惩罚系数
+MADM_MISSING_THRESHOLD=0.4          # 均值/KNN切换阈值
+MADM_SENSITIVITY_PERTURB=0.20       # 灵敏度扰动幅度
+```
+
+### 5.3 Pipeline 并发配置
+```
+PIPE_BUFFER_SIZE=200                # Channel缓冲大小
+PIPE_WORKERS_EVAL=4                 # FEA评估协程数
+PIPE_WORKERS_REPAIR=2               # 推荐计算协程数
+PIPE_WORKERS_ALARM=2                # 告警推送协程数
+```
+
+## 6. 故障排查
+
+### 6.1 服务启动失败
+```bash
+# 查看所有服务状态
+docker compose ps
+
+# 查看后端日志
+docker compose logs -f backend
+
+# 查看数据库日志
+docker compose logs -f timescaledb
+```
+
+### 6.2 MQTT 消息丢失
+检查离线队列目录 `./mqtt_queue/`，查看持久化的 JSON 文件。
+
+### 6.3 FEA 评估慢
+- 检查 `aqueduct_eval_duration_seconds` 指标
+- 增加 `PIPE_WORKERS_EVAL` 协程数
+- 检查 `aqueduct_fea_nonconverge_total` 指标
+
+### 6.4 数据库连接失败
+确认 `.env` 中的 `TIMESCALE_HOST=timescaledb`，使用 Docker 服务名而非 localhost。
+
+## 7. 目录结构
 
 ```
 AI_solo_coder_task_A_080/
-├── backend/                    # Go 后端服务
-│   ├── main.go                 # 入口 + 路由 + 定时评估Cron
-│   ├── go.mod                  # 依赖：Gin/pgx/v5/paho.mqtt/gonum
-│   ├── .env                    # 环境配置（数据库/MQTT/阈值）
-│   ├── config/                 # 配置加载
-│   ├── database/               # TimescaleDB连接池
-│   ├── models/                 # 数据模型（20+实体）
-│   ├── repository/             # SQL数据访问层
-│   ├── handlers/               # HTTP API处理器
-│   ├── evaluation/             # ⭐ FEA结构评估核心
-│   ├── recommendation/         # ⭐ TOPSIS修复推荐引擎
-│   └── mqtt/                   # MQTT告警发布器
-│
-├── simulator/                  # 传感器数据模拟器
-│   ├── main.go                 # 365天历史回填 + 实时模拟
-│   └── go.mod
-│
-├── frontend/                   # 前端（Three.js + Canvas）
-│   ├── index.html              # 入口
-│   ├── css/style.css           # 古罗马金+深蓝配色主题
-│   └── js/
-│       ├── api.js              # API封装+格式化工具
-│       ├── viz.js              # ⭐ Three.js 3D场景
-│       └── app.js              # ⭐ 面板/图表/业务逻辑
-│
+├── backend/                      # Go 后端服务
+│   ├── main.go                   # 入口（集成pprof/gzip/metrics）
+│   ├── Dockerfile                # 后端Dockerfile
+│   ├── Dockerfile.simulator      # 模拟器Dockerfile
+│   ├── .dockerignore
+│   ├── .env                      # 环境配置
+│   ├── go.mod/go.sum
+│   ├── metrics/                  # Prometheus指标定义
+│   ├── dtu_receiver/             # DTU数据接收模块
+│   ├── structural_evaluator/     # 结构评估模块
+│   ├── repair_advisor/           # 修复推荐模块
+│   ├── alarm_publisher/          # 告警推送模块
+│   ├── pipeline/                 # 管道组装器
+│   ├── config/                   # 配置（参数外置）
+│   ├── evaluation/               # FEA核心算法
+│   ├── recommendation/           # 推荐算法
+│   ├── mqtt/                     # MQTT客户端
+│   ├── handlers/                 # API处理器
+│   └── database/                 # 数据库连接
+├── simulator/                    # 传感器模拟器
+│   └── main.go
 ├── database/
-│   └── init.sql                # TimescaleDB DDL（10+表，2条连续聚合）
-│
+│   └── init.sql                  # DB初始化 + 压缩策略
+├── frontend/                     # 前端三维可视化
+│   ├── index.html
+│   ├── css/style.css
+│   └── js/
+│       ├── viz.js                # 兼容层
+│       ├── aqueduct_3d_viewer.js # 3D视图类
+│       └── repair_panel.js       # 修复面板类
 ├── mqtt/
-│   └── mosquitto.conf          # Eclipse Mosquitto配置
-│
-├── docker-compose.yml          # 一键启动：TimescaleDB + MQTT + MQTTExplorer
-├── start.ps1                   # Windows一键启动脚本（Go后端+模拟器+前端）
+│   └── mosquitto.conf
+├── monitoring/                   # 监控配置
+│   └── prometheus.yml
+├── mqtt_queue/                   # MQTT离线队列持久化
+├── docker-compose.yml            # 服务编排
+├── start.ps1                     # Windows启动脚本
 └── README.md
 ```
 
----
+## 8. API 端点
 
-## 🚀 快速开始
-
-### 前置要求
-- **Docker Desktop** (>=4.20) - 运行 TimescaleDB、MQTT Broker
-- **Go** (>=1.21) - 编译后端和模拟器
-- **现代浏览器** - Chrome/Edge/Firefox（支持 ES Modules 和 WebGL）
-
-### 方式一：一键启动（推荐）
-```powershell
-# 在项目根目录
-powershell -ExecutionPolicy Bypass -File start.ps1
-```
-脚本会自动：
-1. ✅ Docker Compose 启动 TimescaleDB(5432)、Mosquitto(1883)、MQTT-Explorer(4000)
-2. ✅ 自动执行 `init.sql` 初始化11条水道 + 传感器 + 材料库
-3. ✅ 编译启动 Go 后端 (8080端口)
-4. ✅ 启动模拟器：回填365天历史 + 进入实时模拟模式
-5. ✅ 自动打开浏览器加载前端
-
-### 方式二：分步手动启动
-```powershell
-# 1. 启动基础设施
-docker compose up -d --wait
-
-# 2. 启动后端（5432端口就绪后）
-cd backend
-go mod tidy
-go run .
-
-# 3. 新开窗口：启动模拟器（先回填再实时）
-cd simulator
-go run .
-
-# 4. 打开前端
-explorer frontend\index.html
-```
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/health` | 健康检查 |
+| `GET` | `/metrics` | Prometheus 指标 |
+| `GET` | `/debug/pprof/*` | pprof 调试 |
+| `POST` | `/api/dtu/submit` | DTU传感器数据上报 |
+| `GET` | `/api/aqueducts` | 水道列表 |
+| `GET` | `/api/aqueducts/:id` | 水道详情 |
+| `GET` | `/api/segments` | 结构段列表（3D模型用） |
+| `GET` | `/api/segments/:id` | 结构段详情+1年趋势 |
+| `GET` | `/api/segments/:id/repair` | 修复方案推荐 |
+| `GET` | `/api/sensors/:id/trend` | 传感器历史趋势 |
+| `GET` | `/api/alerts` | 告警列表 |
+| `GET` | `/api/stats` | 综合统计 |
+| `GET` | `/api/materials` | 修复材料库 |
+| `POST` | `/api/evaluation/run` | 触发全量评估 |
 
 ---
 
-## 🌐 API 接口清单
-
-### DTU数据采集
-| Method | 路径 | 描述 |
-|--------|-----|------|
-| POST | `/api/dtu/submit` | DTU批量提交传感器读数 |
-
-### 数据查询
-| Method | 路径 | 描述 |
-|--------|-----|------|
-| GET | `/api/aqueducts` | 11条水道列表 |
-| GET | `/api/aqueducts/:id` | 水道详情+结构段+传感器+告警 |
-| GET | `/api/segments[?aqueduct_id=]` | 结构段列表（含承载力着色数据） |
-| GET | `/api/segments/:id` | 结构段详情 + 近1年3类趋势数据 |
-| GET | `/api/segments/:id/repair` | ⭐ **修复方案推荐结果** |
-| GET | `/api/sensors/:id/trend` | 传感器历史趋势（可调粒度） |
-| GET | `/api/materials` | 修复材料数据库 |
-| GET | `/api/alerts` | 活动告警列表（按严重度排序） |
-| GET | `/api/stats` | 首页概览统计指标 |
-| POST | `/api/evaluation/run` | 手动触发全段评估 |
-| GET | `/api/health` | 健康检查 |
-
----
-
-## 🧪 典型使用流程
-
-1. **启动系统** → 等待模拟器回填完365天数据（约2-5分钟，后端窗口可见进度条）
-2. **打开前端** → 左侧点击任一条水道（如 *Claudia水道* 最高的拱券水道）
-3. **观察3D模型**：
-   - 🎨 切换"风化深度/承载力"配色模式
-   - 📐 切换线框模式检查内部结构
-   - 🖱️ 悬停结构看实时tooltip
-4. **点击高风险红色段** → 右侧面板查看：
-   - 承载力比值进度条（<50%闪红）
-   - 近1年应力/风化/沉降趋势图
-   - 风化速率加速指示
-5. **切换【修复推荐】Tab** → 查看：
-   - TOPSIS多属性决策排名（★最佳推荐）
-   - 古罗马配方 vs 现代材料属性对比
-   - 造价估算、预期寿命、施工建议
-6. **切换【告警】Tab** → 查看MQTT实时推送到文物保护中心的告警
-
----
-
-## 🎯 算法核心说明
-
-### 结构承载力计算核心公式
-```
-有效强度 f'_c = f_c × η_weathering × η_settlement × η_aging
-   weathering = (1 - d_wear/t_struct)^1.3  (风化截面损失)
-   settlement = 1 - (Δ/2Δ_max)×0.25      (沉降折减)
-   aging      = 0.85 + 0.15e^(-T/800)     (时间老化)
-
-承载力比 R = f'_c / f_c,design
-   ≥80% → SAFE / <50% → CRITICAL(加固预警)
-
-应力校核（Simplified FEA）:
-   拱顶轴力 N = qL²/(8f), 弯矩 M = qL²/8×(1-1.4f/L)
-   墩柱偏心 e = H/2 × sin(Δ_rot), 弯曲应力 σ_b = N·e / W
-   最大应力 σ_max = (N/A + |M|/W) × K_stress
-```
-
-### TOPSIS决策流程
-```
-1. 决策矩阵 X(n×m) → 向量归一化 X'_ij = X_ij/√ΣX²
-2. 加权归一化 V_ij = w_j × X'_ij (文物模式自动加权调整)
-3. 正负理想解 V⁺/V⁻（效益型取max/成本型取min）
-4. 欧氏距离 D⁺_i/D⁻_i = √Σ(V-V⁺/⁻)²
-5. 贴近度 C_i = D⁻_i/(D⁺_i + D⁻_i)
-6. 遗产加成: 罗马混凝土 ×1.12, 石灰砂浆 ×1.08
-7. 降序排序 C_i → TOP1 推荐
-```
-
----
-
-## 📜 11条古罗马水道
-
-| 水道名 | 拉丁名 | 始建 | 长度(km) | 最高拱(m) | 备注 |
-|-------|--------|-----|---------|----------|------|
-| Appia | Aqua Appia | BC312 | 16.4 | 15.0 | 第一条水道 |
-| Anio Vetus | Aqua Anio Vetus | BC272 | 63.7 | 25.0 | 早期石砌 |
-| Marta | Aqua Marcia | BC144 | 91.3 | 30.0 | 最高之一 |
-| Tepula | Aqua Tepula | BC126 | 18.0 | 22.0 | 温水供应 |
-| Julia | Aqua Julia | BC33 | 22.0 | 25.0 | Agrippa建 |
-| Virgo | Aqua Virgo | BC19 | 21.0 | 18.0 | 保存最佳 |
-| Alsietina | Aqua Alsietina | AD2 | 32.8 | 12.0 | 花园喷泉 |
-| Claudia | Aqua Claudia | AD52 | 68.7 | 33.0 | 最大拱券 |
-| Anio Novus | Aqua Anio Novus | AD38 | 86.8 | 28.0 | 水量最大 |
-| Traiana | Aqua Traiana | AD109 | 56.8 | 20.0 | 图拉真 |
-| Severiana | Aqua Severiana | AD226 | 32.9 | 15.0 | 末代帝国水道 |
-
----
-
-## 🔧 关键配置参数 (.env)
-
-```ini
-# 承载力加固预警阈值 (0.50 = 50%设计值)
-LOAD_CAPACITY_THRESHOLD=0.50
-
-# 沉降限值 (mm)
-SETTLEMENT_LIMIT_MM=20.0
-
-# 风化加速判定 (近期/长期 比值)
-WEATHERING_ACCELERATION_RATIO=1.5
-```
-
----
-
-## 🛠️ 技术栈
-
-| 层级 | 技术选型 |
-|-----|---------|
-| **后端语言** | Go 1.21 (Gin Web 框架) |
-| **时序数据库** | PostgreSQL 15 + TimescaleDB 2.13 |
-| **消息中间件** | Eclipse Mosquitto (MQTT 3.1.1) |
-| **科学计算** | Gonum (数值矩阵运算, 预留接口) |
-| **3D渲染** | Three.js r160 + OrbitControls |
-| **2D图表** | 原生 Canvas API (折线/面积/进度图) |
-| **数据模拟器** | Go 内置随机数生成 + 季节/日变化周期函数 |
-| **部署** | Docker Compose + PowerShell 编排 |
-
----
-
-## ⚠️ 故障排查
-
-| 症状 | 排查命令 |
-|-----|---------|
-| 数据库连接失败 | `docker exec aqueduct-timescaledb pg_isready` |
-| 初始化SQL未执行 | `docker logs aqueduct-timescaledb` |
-| MQTT不通 | `docker exec aqueduct-mqtt mosquitto_sub -t 'aqueduct/#' -v` |
-| 前端白屏 | 检查浏览器控制台，确认 importmap three.js 加载成功 |
-| 3D场景黑屏 | 确认浏览器支持 WebGL: https://get.webgl.org |
-| 模拟器历史数据慢 | 属正常现象，建议耐心等待前30%进度后会加速 |
-
----
-
-> 🏺 **关于古罗马混凝土**：公元1世纪已广泛使用 *Opus Caementicium*，其自愈合特性（火山灰+海水→铝托贝莫来石晶体生成）使部分水道历经2000年仍屹立不倒，本系统的配方A/B/C忠实还原了Vitruvius《建筑十书》中的经典配合比。
+**版本**: 1.0.0  
+**上次更新**: 2026-06-10

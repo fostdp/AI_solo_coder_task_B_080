@@ -10,6 +10,7 @@ import (
 
 	"aqueduct-monitor/config"
 	"aqueduct-monitor/evaluation"
+	"aqueduct-monitor/metrics"
 	"aqueduct-monitor/models"
 	"aqueduct-monitor/pipeline"
 	"aqueduct-monitor/repository"
@@ -40,6 +41,9 @@ type StructuralEvaluator struct {
 
 	// thresholds 阈值配置
 	thresholds config.ThresholdConfig
+
+	// metrics Prometheus指标
+	metrics *metrics.Metrics
 
 	// mu 互斥锁，保护共享状态
 	mu sync.Mutex
@@ -309,6 +313,10 @@ func (e *StructuralEvaluator) RunWorkers(ctx context.Context, count int) {
 	}
 }
 
+func (e *StructuralEvaluator) SetMetrics(m *metrics.Metrics) {
+	e.metrics = m
+}
+
 // worker 单个 worker 协程
 // 从 taskChan 读取段ID，执行评估，将结果发送到输出通道
 func (e *StructuralEvaluator) worker(ctx context.Context, id int) {
@@ -324,8 +332,26 @@ func (e *StructuralEvaluator) worker(ctx context.Context, id int) {
 				return
 			}
 
+			start := time.Now()
+
 			// 执行评估
 			result, err := e.evaluateSegmentInternal(ctx, segmentID)
+
+			duration := time.Since(start)
+
+			if e.metrics != nil {
+				if err != nil {
+					e.metrics.EvalErrors.Inc()
+				} else {
+					e.metrics.ObserveEval(duration, result.SafetyLevel, result.AqueductID)
+					if !result.FEAConverged {
+						e.metrics.FEANonConverge.Inc()
+					}
+					if result.FEAIterations > 0 {
+						e.metrics.FEAIterations.Observe(float64(result.FEAIterations))
+					}
+				}
+			}
 
 			// 更新统计
 			e.mu.Lock()

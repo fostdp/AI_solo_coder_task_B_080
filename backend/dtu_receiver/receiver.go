@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"aqueduct-monitor/metrics"
 	"aqueduct-monitor/models"
 	"aqueduct-monitor/pipeline"
 	"aqueduct-monitor/repository"
@@ -19,6 +20,7 @@ type DTUSensorReading struct {
 type DTUReceiver struct {
 	OutChan chan<- pipeline.SensorReadingMsg
 	repo    *repository.Repository
+	metrics *metrics.Metrics
 	stats   *pipeline.PipelineStats
 	mu      sync.Mutex
 }
@@ -94,6 +96,10 @@ func (r *DTUReceiver) SubmitReadings(ctx context.Context, dtuID string, rssi flo
 	r.mu.Lock()
 	for i := range validMsgs {
 		validMsgs[i].Stored = true
+		if r.metrics != nil {
+			r.metrics.ObserveDTU(validMsgs[i].AqueductID, validMsgs[i].SensorType)
+			r.metrics.SetSensorValue(validMsgs[i].SegmentID, validMsgs[i].SensorType, validMsgs[i].Value)
+		}
 		select {
 		case r.OutChan <- validMsgs[i]:
 		default:
@@ -128,6 +134,10 @@ func (r *DTUReceiver) Close() {
 		close(r.OutChan)
 		r.OutChan = nil
 	}
+}
+
+func (r *DTUReceiver) SetMetrics(m *metrics.Metrics) {
+	r.metrics = m
 }
 
 func (r *DTUReceiver) Output() <-chan pipeline.SensorReadingMsg {

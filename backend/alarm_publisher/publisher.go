@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 
+	"aqueduct-monitor/metrics"
 	"aqueduct-monitor/mqtt"
 	"aqueduct-monitor/pipeline"
 	"aqueduct-monitor/repository"
@@ -17,6 +18,7 @@ type AlarmPublisher struct {
 	InChan        <-chan pipeline.AlertMsg // 输入通道
 	mqttPublisher *mqtt.AlertPublisher     // 内部MQTT发布器
 	repo          *repository.Repository   // 数据仓库
+	metrics       *metrics.Metrics         // Prometheus指标
 	mu            sync.Mutex               // 互斥锁
 	stats         *pipeline.PipelineStats  // 统计信息
 	closed        bool                     // 是否已关闭
@@ -45,6 +47,10 @@ func (p *AlarmPublisher) SetInChan(in <-chan pipeline.AlertMsg) {
 
 func (p *AlarmPublisher) SetInputChannel(in <-chan pipeline.AlertMsg) {
 	p.SetInChan(in)
+}
+
+func (p *AlarmPublisher) SetMetrics(m *metrics.Metrics) {
+	p.metrics = m
 }
 
 // Run 主循环，从输入通道读取告警消息并推送
@@ -119,6 +125,11 @@ func (p *AlarmPublisher) workerLoop(ctx context.Context, workerID int) {
 			if err != nil {
 				log.Printf("[AlarmPublisher] Worker-%d 推送失败: %v", workerID, err)
 			}
+
+			if p.metrics != nil && alertMsg.Alert != nil {
+				p.metrics.ObserveAlert(alertMsg.Alert.Severity, alertMsg.Alert.AlertType)
+			}
+
 			p.mu.Lock()
 			p.stats.AlertsPublished++
 			p.stats.QueueSizeAlert = len(p.InChan)

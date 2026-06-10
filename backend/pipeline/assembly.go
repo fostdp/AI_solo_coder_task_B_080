@@ -9,6 +9,7 @@ import (
 	"aqueduct-monitor/alarm_publisher"
 	"aqueduct-monitor/config"
 	"aqueduct-monitor/dtu_receiver"
+	"aqueduct-monitor/metrics"
 	"aqueduct-monitor/mqtt"
 	"aqueduct-monitor/repair_advisor"
 	"aqueduct-monitor/repository"
@@ -19,6 +20,7 @@ type Pipeline struct {
 	cfg        *config.Config
 	repo       *repository.Repository
 	mqttPub    *mqtt.AlertPublisher
+	metrics    *metrics.Metrics
 
 	DTUReceiver         *dtu_receiver.DTUReceiver
 	StructuralEvaluator *structural_evaluator.StructuralEvaluator
@@ -69,6 +71,19 @@ func NewPipeline(cfg *config.Config, repo *repository.Repository, mqttPub *mqtt.
 		repairReqChan:       repairReqChan,
 		repairOutChan:       repairOutChan,
 		alertChan:           alertChan,
+	}
+}
+
+func (p *Pipeline) SetMetrics(m *metrics.Metrics) {
+	p.metrics = m
+	if p.DTUReceiver != nil {
+		p.DTUReceiver.SetMetrics(m)
+	}
+	if p.StructuralEvaluator != nil {
+		p.StructuralEvaluator.SetMetrics(m)
+	}
+	if p.AlarmPublisher != nil {
+		p.AlarmPublisher.SetMetrics(m)
 	}
 }
 
@@ -238,6 +253,14 @@ func (p *Pipeline) statsAggregator(ctx context.Context) {
 			p.stats.QueueSizeRepair = repairStats.QueueSizeRepair
 			p.stats.QueueSizeAlert = alarmStats.QueueSizeAlert
 			p.mu.Unlock()
+
+			if p.metrics != nil {
+				p.metrics.SetQueueSize("dtu", len(p.sensorChan))
+				p.metrics.SetQueueSize("eval", evalStats.QueueSizeEval)
+				p.metrics.SetQueueSize("repair", repairStats.QueueSizeRepair)
+				p.metrics.SetQueueSize("alert", alarmStats.QueueSizeAlert)
+				p.metrics.AlertsBuffered.Set(float64(alarmStats.AlertsBuffered))
+			}
 		}
 	}
 }

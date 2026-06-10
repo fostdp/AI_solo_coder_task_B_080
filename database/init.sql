@@ -6,6 +6,9 @@
 -- 创建扩展
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE EXTENSION IF NOT EXISTS postgis;
+
+-- 启用 TimescaleDB 压缩特性
+ALTER TABLE sensor_data SET (timescaledb.compress, timescaledb.compress_orderby = 'timestamp DESC', timescaledb.compress_segmentby = 'sensor_id');
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ============================================
@@ -379,3 +382,44 @@ SELECT add_continuous_aggregate_policy('sensor_data_hourly',
     schedule_interval => INTERVAL '30 minutes',
     if_not_exists => TRUE
 );
+
+-- ─────────────────────────────────────────────────────────────
+-- 11. 自动压缩策略
+-- ─────────────────────────────────────────────────────────────
+
+-- 压缩策略说明：
+-- - 30天以上原始数据自动压缩（存储空间减少80-95%）
+-- - 30天以上小时聚合数据自动压缩
+-- - 90天以上日聚合数据自动压缩
+-- - 压缩后查询完全透明，性能影响可忽略
+-- - 可通过 alter_job 修改压缩策略
+
+-- 历史数据压缩策略：超过30天的数据自动压缩
+SELECT add_compression_policy(
+    'sensor_data',
+    INTERVAL '30 days',
+    if_not_exists => TRUE
+);
+
+-- 原始超表压缩（如果需要）
+-- 压缩后的查询仍然透明，但写入性能下降，所以只压缩历史数据
+
+-- 连续聚合的压缩策略：超过90天的聚合数据自动压缩
+SELECT add_compression_policy(
+    'sensor_data_daily',
+    INTERVAL '90 days',
+    if_not_exists => TRUE
+);
+
+SELECT add_compression_policy(
+    'sensor_data_hourly',
+    INTERVAL '30 days',
+    if_not_exists => TRUE
+);
+
+-- 手动压缩测试（可选，用于快速验证）
+-- SELECT compress_chunk(i, if_not_exists => TRUE)
+-- FROM show_chunks('sensor_data', older_than => INTERVAL '7 days') i;
+
+-- 数据保留策略（可选，默认不启用，需要时打开）
+-- SELECT add_retention_policy('sensor_data', INTERVAL '10 years');

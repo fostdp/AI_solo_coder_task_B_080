@@ -12,6 +12,7 @@ import (
 	"aqueduct-monitor/config"
 	"aqueduct-monitor/dtu_receiver"
 	"aqueduct-monitor/evaluation"
+	"aqueduct-monitor/metrics"
 	"aqueduct-monitor/models"
 	"aqueduct-monitor/mqtt"
 	"aqueduct-monitor/pipeline"
@@ -27,10 +28,11 @@ type Handler struct {
 	mqttClient  *mqtt.AlertPublisher
 	pipeline    *pipeline.Pipeline
 	dtuRecv     *dtu_receiver.DTUReceiver
+	metrics     *metrics.Metrics
 }
 
 func New(repo *repository.Repository, cfg *config.Config, evaluator *evaluation.StructuralEvaluator,
-	recommender *recommendation.RepairRecommender, mqttClient *mqtt.AlertPublisher, pipe *pipeline.Pipeline) *Handler {
+	recommender *recommendation.RepairRecommender, mqttClient *mqtt.AlertPublisher, pipe *pipeline.Pipeline, m *metrics.Metrics) *Handler {
 	return &Handler{
 		repo:        repo,
 		cfg:         cfg,
@@ -39,6 +41,7 @@ func New(repo *repository.Repository, cfg *config.Config, evaluator *evaluation.
 		mqttClient:  mqttClient,
 		pipeline:    pipe,
 		dtuRecv:     pipe.Receiver(),
+		metrics:     m,
 	}
 }
 

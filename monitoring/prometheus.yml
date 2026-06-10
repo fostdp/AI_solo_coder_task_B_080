@@ -1,0 +1,47 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'aqueduct-monitor'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'aqueduct-backend'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['backend:8080']
+        labels:
+          service: 'aqueduct-monitor'
+          component: 'backend'
+          environment: 'production'
+
+    # 可选的 TLS 和认证配置
+    # scheme: https
+    # tls_config:
+    #   ca_file: ca.crt
+    # basic_auth:
+    #   username: admin
+    #   password: secret
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+# 告警管理器配置（可选）
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#            - alertmanager:9093
+
+# 告警规则文件（可选）
+# rule_files:
+#   - "alerts.yml"

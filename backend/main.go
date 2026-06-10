@@ -5,19 +5,23 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/gin-contrib/cors"
+	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/robfig/cron/v3"
 
 	"aqueduct-monitor/config"
 	"aqueduct-monitor/database"
 	"aqueduct-monitor/evaluation"
 	"aqueduct-monitor/handlers"
+	"aqueduct-monitor/metrics"
 	"aqueduct-monitor/mqtt"
 	"aqueduct-monitor/pipeline"
 	"aqueduct-monitor/recommendation"
@@ -57,7 +61,10 @@ func main() {
 		}()
 	}
 
+	appMetrics := metrics.NewMetrics()
+
 	pipe := pipeline.NewPipeline(cfg, repo, mqttClient)
+	pipe.SetMetrics(appMetrics)
 	pipeCtx, pipeCancel := context.WithCancel(context.Background())
 	defer pipeCancel()
 	go func() {
@@ -66,7 +73,7 @@ func main() {
 		}
 	}()
 
-	h := handlers.New(repo, cfg, evaluator, recommender, mqttClient, pipe)
+	h := handlers.New(repo, cfg, evaluator, recommender, mqttClient, pipe, appMetrics)
 
 	r := gin.New()
 	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
@@ -89,6 +96,12 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
+	r.Use(gzip.Gzip(gzip.DefaultCompression))
+
+	r.Use(prometheusMiddleware(appMetrics))
+
+	gin.SetMode(gin.ReleaseMode)
+
 	r.GET("/api/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":    "healthy",
@@ -97,6 +110,22 @@ func main() {
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		})
 	})
+
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	pprofGroup := r.Group("/debug/pprof")
+	{
+		pprofGroup.GET("/", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/cmdline", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/profile", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/symbol", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/trace", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/heap", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/goroutine", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/block", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/mutex", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+		pprofGroup.GET("/threadcreate", gin.WrapF(http.DefaultServeMux.ServeHTTP))
+	}
 
 	api := r.Group("/api")
 	{
@@ -118,6 +147,13 @@ func main() {
 
 		api.POST("/evaluation/run", h.RunFullEvaluation)
 	}
+
+	r.GET("/", func(c *gin.Context) {
+		c.File("../frontend/index.html")
+	})
+	r.Static("/css", "../frontend/css")
+	r.Static("/js", "../frontend/js")
+	r.StaticFile("/favicon.ico", "../frontend/favicon.ico")
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	srv := &http.Server{
@@ -191,4 +227,21 @@ func main() {
 	}
 
 	log.Println("Server exited successfully")
+}
+
+func prometheusMiddleware(m *metrics.Metrics) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.FullPath()
+
+		c.Next()
+
+		duration := time.Since(start)
+		statusCode := fmt.Sprintf("%d", c.Writer.Status())
+		method := c.Request.Method
+
+		if path != "" {
+			m.ObserveHTTP(method, path, statusCode, duration)
+		}
+	}
 }
