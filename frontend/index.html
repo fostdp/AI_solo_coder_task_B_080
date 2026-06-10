@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>古罗马水道工程结构健康与现代修复评估系统</title>
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <header class="top-bar">
+    <div class="brand">
+      <div class="logo">🏛️</div>
+      <div class="title-group">
+        <h1>古罗马水道工程结构健康与现代修复评估系统</h1>
+        <p>Aqua Augusta Monitoring Platform · Structural Health & Rehabilitation Decision Support</p>
+      </div>
+    </div>
+    <div class="header-stats" id="headerStats"></div>
+    <div class="header-actions">
+      <button class="btn btn-refresh" onclick="app.refresh()">🔄 刷新数据</button>
+      <button class="btn btn-eval" onclick="app.runFullEvaluation()">⚙️ 全量评估</button>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="panel sidebar-header">
+      <h3>📋 水道清单</h3>
+      <p class="panel-hint">11条古罗马帝国水道 · 点击选择</p>
+    </div>
+    <div id="aqueductList" class="aqueduct-list"></div>
+    <div class="panel legend-panel">
+      <h3>🎨 风化/安全图例</h3>
+      <div class="legend-group">
+        <div class="legend-title">风化深度 (砂浆)</div>
+        <div class="legend-colorbar" id="weatheringBar"></div>
+        <div class="legend-labels">
+          <span>0mm</span><span>10mm</span><span>20mm</span><span>40mm+</span>
+        </div>
+      </div>
+      <div class="legend-group">
+        <div class="legend-title">结构安全等级</div>
+        <div class="legend-safety">
+          <div class="legend-item"><span class="dot" style="background:#4CAF50"></span>安全 SAFE (≥80%)</div>
+          <div class="legend-item"><span class="dot" style="background:#FFEB3B"></span>注意 WARNING (≥65%)</div>
+          <div class="legend-item"><span class="dot" style="background:#FF9800"></span>危险 DANGER (≥50%)</div>
+          <div class="legend-item"><span class="dot" style="background:#F44336"></span>严重 CRITICAL (&lt;50%)</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main-area">
+    <div class="top-info-bar" id="topInfoBar"></div>
+
+    <div class="view-container">
+      <div class="viewer-3d" id="viewer3d">
+        <canvas id="sceneCanvas"></canvas>
+        <div class="viewer-controls">
+          <button class="ctrl-btn" onclick="viz.resetView()" title="重置视角">🎯</button>
+          <button class="ctrl-btn" onclick="viz.toggleWireframe()" title="线框模式">📐</button>
+          <button class="ctrl-btn" onclick="viz.toggleColorMode()" title="切换颜色:风化/安全">🎨</button>
+          <button class="ctrl-btn" onclick="viz.zoomToFit()" title="适配视角">🔍</button>
+          <span class="ctrl-info" id="colorModeLabel">颜色模式: 风化深度</span>
+        </div>
+        <div class="viewer-tooltip" id="viewerTooltip"></div>
+        <div class="viewer-hud">
+          <div id="hudInfo">悬停结构段查看详情</div>
+          <canvas id="minimapCanvas" width="220" height="140"></canvas>
+        </div>
+      </div>
+
+      <aside class="right-panel">
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="detail" onclick="app.switchTab('detail')">📊 详情</button>
+          <button class="tab-btn" data-tab="repair" onclick="app.switchTab('repair')">🔧 修复推荐</button>
+          <button class="tab-btn" data-tab="alerts" onclick="app.switchTab('alerts')">🚨 告警 <span id="alertBadge" class="badge">0</span></button>
+        </div>
+
+        <div class="tab-content active" id="tab-detail">
+          <div id="detailPanel" class="panel"></div>
+        </div>
+        <div class="tab-content" id="tab-repair">
+          <div id="repairPanel" class="panel"></div>
+        </div>
+        <div class="tab-content" id="tab-alerts">
+          <div id="alertsPanel" class="panel"></div>
+        </div>
+      </aside>
+    </div>
+  </main>
+</div>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<script src="js/api.js"></script>
+<script src="js/viz.js" type="module"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

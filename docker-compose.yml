@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.13.0-pg15
+    container_name: aqueduct-timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: aqueduct_monitor
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aqueduct_monitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - aqueduct-net
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0.18
+    container_name: aqueduct-mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 2 -h localhost || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - aqueduct-net
+
+  mqtt-explorer:
+    image: smeagolworms4/mqtt-explorer:latest
+    container_name: aqueduct-mqtt-explorer
+    ports:
+      - "4000:4000"
+    environment:
+      HTTP_PORT: 4000
+      CONFIG_PATH: /mqtt-explorer/config
+    volumes:
+      - mqtt_explorer_config:/mqtt-explorer/config
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+    networks:
+      - aqueduct-net
+
+volumes:
+  timescaledb_data:
+  mosquitto_data:
+  mosquitto_log:
+  mqtt_explorer_config:
+
+networks:
+  aqueduct-net:
+    driver: bridge
