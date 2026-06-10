@@ -19,6 +19,7 @@ import (
 	"aqueduct-monitor/evaluation"
 	"aqueduct-monitor/handlers"
 	"aqueduct-monitor/mqtt"
+	"aqueduct-monitor/pipeline"
 	"aqueduct-monitor/recommendation"
 	"aqueduct-monitor/repository"
 )
@@ -56,7 +57,16 @@ func main() {
 		}()
 	}
 
-	h := handlers.New(repo, cfg, evaluator, recommender, mqttClient)
+	pipe := pipeline.NewPipeline(cfg, repo, mqttClient)
+	pipeCtx, pipeCancel := context.WithCancel(context.Background())
+	defer pipeCancel()
+	go func() {
+		if err := pipe.Start(pipeCtx); err != nil && err != context.Canceled {
+			log.Printf("Pipeline error: %v", err)
+		}
+	}()
+
+	h := handlers.New(repo, cfg, evaluator, recommender, mqttClient, pipe)
 
 	r := gin.New()
 	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {

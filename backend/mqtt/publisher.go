@@ -552,6 +552,25 @@ func (p *AlertPublisher) RepublishPendingAlerts(ctx context.Context) (int, error
 	return published, nil
 }
 
+func (p *AlertPublisher) FlushOfflineQueue() int {
+	if p.offlineQueue.Size() == 0 {
+		return 0
+	}
+
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return 0
+	}
+
+	beforeSize := p.offlineQueue.Size()
+	p.flushOfflineQueue()
+	afterSize := p.offlineQueue.Size()
+
+	return beforeSize - afterSize
+}
+
 func (p *AlertPublisher) QueueStats() map[string]interface{} {
 	return map[string]interface{}{
 		"offline_size":   p.offlineQueue.Size(),

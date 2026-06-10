@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -132,6 +133,42 @@ func (r *Repository) GetAllSegmentsWithStatus(ctx context.Context, aqueductID *u
 	}
 
 	return segments, nil
+}
+
+func (r *Repository) GetSegmentByIDWithStatus(ctx context.Context, segmentID uuid.UUID) (*models.StructureSegment, error) {
+	query := `
+		SELECT s.id, s.aqueduct_id, s.segment_type, s.segment_index, s.position_geo, 
+			   s.position_3d, s.design_strength, s.original_material, s.design_load_capacity,
+			   COALESCE(e.residual_capacity_ratio, 1.0) as capacity_ratio,
+			   COALESCE(e.current_stress, 0) as current_stress,
+			   COALESCE(e.weathering_depth, 0) as weathering_depth,
+			   COALESCE(e.settlement_mm, 0) as settlement_mm,
+			   COALESCE(e.safety_level, 'SAFE') as safety_level,
+			   COALESCE(e.residual_strength, s.design_strength) as residual_capacity
+		FROM structure_segments s
+		LEFT JOIN LATERAL (
+			SELECT residual_capacity_ratio, current_stress, weathering_depth, 
+				   settlement_mm, safety_level, residual_strength
+			FROM structural_evaluations
+			WHERE segment_id = s.id
+			ORDER BY evaluation_time DESC
+			LIMIT 1
+		) e ON true
+		WHERE s.id = $1
+	`
+
+	row := r.db.QueryRow(ctx, query, segmentID)
+	segment, err := pgx.RowToStructByNameLax[models.StructureSegment](row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("GetSegmentByIDWithStatus query failed: %w", err)
+	}
+
+	segment.WeatheringColor = getWeatheringColor(segment.WeatheringDepth)
+
+	return &segment, nil
 }
 
 func (r *Repository) GetSensorByCode(ctx context.Context, code string) (*models.Sensor, error) {

@@ -10,9 +10,11 @@ import (
 	"github.com/google/uuid"
 
 	"aqueduct-monitor/config"
+	"aqueduct-monitor/dtu_receiver"
 	"aqueduct-monitor/evaluation"
 	"aqueduct-monitor/models"
 	"aqueduct-monitor/mqtt"
+	"aqueduct-monitor/pipeline"
 	"aqueduct-monitor/recommendation"
 	"aqueduct-monitor/repository"
 )
@@ -23,16 +25,20 @@ type Handler struct {
 	evaluator   *evaluation.StructuralEvaluator
 	recommender *recommendation.RepairRecommender
 	mqttClient  *mqtt.AlertPublisher
+	pipeline    *pipeline.Pipeline
+	dtuRecv     *dtu_receiver.DTUReceiver
 }
 
 func New(repo *repository.Repository, cfg *config.Config, evaluator *evaluation.StructuralEvaluator,
-	recommender *recommendation.RepairRecommender, mqttClient *mqtt.AlertPublisher) *Handler {
+	recommender *recommendation.RepairRecommender, mqttClient *mqtt.AlertPublisher, pipe *pipeline.Pipeline) *Handler {
 	return &Handler{
 		repo:        repo,
 		cfg:         cfg,
 		evaluator:   evaluator,
 		recommender: recommender,
 		mqttClient:  mqttClient,
+		pipeline:    pipe,
+		dtuRecv:     pipe.Receiver(),
 	}
 }
 
@@ -69,40 +75,34 @@ func (h *Handler) SubmitSensorData(c *gin.Context) {
 	}
 
 	ctx := context.Background()
-	var validData []models.SensorData
-	var segmentsToEvaluate = make(map[uuid.UUID]bool)
 
-	for _, reading := range req.Readings {
-		sensor, err := h.repo.GetSensorByCode(ctx, reading.SensorCode)
-		if err != nil {
-			log.Printf("Warning: Unknown sensor code %s: %v", reading.SensorCode, err)
-			continue
-		}
-
+	dtuReadings := make([]dtu_receiver.DTUSensorReading, 0, len(req.Readings))
+	for _, r := range req.Readings {
 		readingTime := batchTime
-		if reading.Timestamp != "" {
-			if t, err := time.Parse(time.RFC3339, reading.Timestamp); err == nil {
+		if r.Timestamp != "" {
+			if t, err := time.Parse(time.RFC3339, r.Timestamp); err == nil {
 				readingTime = t.UTC()
 			}
 		}
-
-		validData = append(validData, models.SensorData{
-			SensorID:   sensor.ID,
-			AqueductID: sensor.AqueductID,
-			SensorType: sensor.SensorType,
-			SegmentID:  sensor.SegmentID,
+		dtuReadings = append(dtuReadings, dtu_receiver.DTUSensorReading{
+			SensorCode: r.SensorCode,
+			Value:      r.Value,
 			Timestamp:  readingTime,
-			Value:      reading.Value,
-			Unit:       reading.Unit,
-			Quality:    1,
-			DtuID:      req.DtuID,
-			RSSI:       req.RSSI,
 		})
-
-		segmentsToEvaluate[sensor.SegmentID] = true
 	}
 
-	if len(validData) == 0 {
+	msgs, err := h.dtuRecv.SubmitReadings(ctx, req.DtuID, req.RSSI, dtuReadings)
+	if err != nil {
+		log.Printf("ERROR processing DTU readings: %v", err)
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "processing_error",
+			Message: "Failed to process sensor data",
+			Code:    http.StatusInternalServerError,
+		})
+		return
+	}
+
+	if len(msgs) == 0 {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "no_valid_sensor_data",
 			Message: "No valid sensor readings were accepted",
@@ -111,40 +111,14 @@ func (h *Handler) SubmitSensorData(c *gin.Context) {
 		return
 	}
 
-	if err := h.repo.InsertSensorData(ctx, validData); err != nil {
-		log.Printf("ERROR inserting sensor data: %v", err)
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "database_error",
-			Message: "Failed to store sensor data",
-			Code:    http.StatusInternalServerError,
-		})
-		return
-	}
-
-	go func() {
-		evalCtx := context.Background()
-		for segmentID := range segmentsToEvaluate {
-			alerts, err := h.evaluator.EvaluateSegment(evalCtx, segmentID)
-			if err != nil {
-				log.Printf("ERROR evaluating segment %s: %v", segmentID, err)
-				continue
-			}
-
-			for _, alert := range alerts {
-				if err := h.mqttClient.PublishAlert(evalCtx, alert); err != nil {
-					log.Printf("ERROR publishing MQTT alert: %v", err)
-				}
-			}
-		}
-	}()
-
 	c.JSON(http.StatusOK, models.SuccessResponse{
 		Status:  "success",
 		Message: "Sensor data accepted",
 		Data: gin.H{
-			"accepted_readings": len(validData),
+			"accepted_readings": len(msgs),
 			"dtu_id":            req.DtuID,
 			"processed_at":      time.Now().UTC().Format(time.RFC3339),
+			"pipeline_queued":   true,
 		},
 	})
 }
