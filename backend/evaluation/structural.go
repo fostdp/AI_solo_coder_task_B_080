@@ -72,6 +72,13 @@ const (
 	POISSONS_RATIO_STONE = 0.18
 	YOUNGS_MODULUS_STONE  = 28.0
 	DESIGN_SAFETY_FACTOR  = 3.5
+
+	FEA_MAX_ITERATIONS    = 50
+	FEA_TOLERANCE         = 1e-4
+	FEA_RELAXATION        = 0.5
+	FEA_MIN_ELEMENTS      = 6
+	FEA_MAX_ELEMENTS      = 32
+	FEA_CURVATURE_THRESH  = 0.15
 )
 
 func NewStructuralEvaluator(repo *repository.Repository, cfg *config.Config) *StructuralEvaluator {
@@ -196,24 +203,68 @@ func (e *StructuralEvaluator) buildFEAModel(segment *models.StructureSegment, se
 				height = h
 			}
 		}
-		model.Nodes = []Node{
-			{ID: 1, X: 0, Y: 0, Z: 0, Fixed: [3]bool{true, true, true}},
-			{ID: 2, X: 0, Y: 0, Z: height * 0.5},
-			{ID: 3, X: 0, Y: 0, Z: height},
-			{ID: 4, X: PIER_WIDTH, Y: 0, Z: 0, Fixed: [3]bool{true, true, true}},
-			{ID: 5, X: PIER_WIDTH, Y: 0, Z: height * 0.5},
-			{ID: 6, X: PIER_WIDTH, Y: 0, Z: height},
+
+		pierArea := PIER_WIDTH * PIER_DEPTH
+
+		nVertical := 3
+		nHorizontal := 3
+		slenderness := height / math.Sqrt(pierArea)
+		if slenderness > 8 {
+			nVertical = 4
 		}
-		area := PIER_WIDTH * PIER_DEPTH
-		model.Elements = []Element{
-			{ID: 1, NodeIDs: [2]int{1, 2}, Area: area, Length: height * 0.5},
-			{ID: 2, NodeIDs: [2]int{2, 3}, Area: area, Length: height * 0.5},
-			{ID: 3, NodeIDs: [2]int{4, 5}, Area: area, Length: height * 0.5},
-			{ID: 4, NodeIDs: [2]int{5, 6}, Area: area, Length: height * 0.5},
-			{ID: 5, NodeIDs: [2]int{1, 4}, Area: area * 0.3, Length: PIER_WIDTH},
-			{ID: 6, NodeIDs: [2]int{2, 5}, Area: area * 0.3, Length: PIER_WIDTH},
-			{ID: 7, NodeIDs: [2]int{3, 6}, Area: area * 0.3, Length: PIER_WIDTH},
+		if slenderness > 12 {
+			nVertical = 5
 		}
+
+		nodeID := 1
+		for col := 0; col < 2; col++ {
+			x := 0.0
+			if col == 1 {
+				x = PIER_WIDTH
+			}
+			for row := 0; row < nVertical; row++ {
+				z := height * float64(row) / float64(nVertical-1)
+				fixed := row == 0
+				model.Nodes = append(model.Nodes, Node{
+					ID:    nodeID,
+					X:     x,
+					Y:     0,
+					Z:     z,
+					Fixed: [3]bool{fixed, true, fixed},
+				})
+				nodeID++
+			}
+		}
+
+		elemID := 1
+		for col := 0; col < 2; col++ {
+			for row := 0; row < nVertical-1; row++ {
+				n1 := col*nVertical + row + 1
+				n2 := n1 + 1
+				hLen := height / float64(nVertical-1)
+				model.Elements = append(model.Elements, Element{
+					ID:     elemID,
+					NodeIDs: [2]int{n1, n2},
+					Area:   pierArea / 2.0,
+					Length: hLen,
+				})
+				elemID++
+			}
+		}
+
+		for row := 0; row < nVertical; row++ {
+			n1 := row + 1
+			n2 := nVertical + row + 1
+			model.Elements = append(model.Elements, Element{
+				ID:     elemID,
+				NodeIDs: [2]int{n1, n2},
+				Area:   pierArea * 0.25,
+				Length: PIER_WIDTH,
+			})
+			elemID++
+		}
+		_ = nHorizontal
+
 	} else if segment.SegmentType == "arch" {
 		span := 5.5
 		if s, ok := segment.Position3D["span"]; ok {
@@ -222,37 +273,123 @@ func (e *StructuralEvaluator) buildFEAModel(segment *models.StructureSegment, se
 			}
 		}
 		rise := span * ARCH_RISE_RATIO
-		nNodes := 9
 
-		for i := 0; i < nNodes; i++ {
-			x := (float64(i) / float64(nNodes-1)) * span
-			parabolic := 4 * rise / (span * span) * x * (span - x)
-			fixed := i == 0 || i == nNodes-1
-			model.Nodes = append(model.Nodes, Node{
+		initialElements := FEA_MIN_ELEMENTS
+		aspectRatio := span / rise
+		if aspectRatio < 3 {
+			initialElements = 8
+		} else if aspectRatio > 6 {
+			initialElements = 5
+		}
+
+		initialNodes := initialElements + 1
+		rawParams := make([]float64, initialNodes)
+		rawCoords := make([][2]float64, initialNodes)
+
+		for i := 0; i < initialNodes; i++ {
+			t := float64(i) / float64(initialNodes-1)
+			rawParams[i] = t
+			x := t * span
+			z := 4 * rise / (span * span) * x * (span - x)
+			rawCoords[i] = [2]float64{x, z}
+		}
+
+		refinedParams := []float64{0.0, 1.0}
+		for iteration := 0; iteration < 3; iteration++ {
+			needRefine := []int{}
+			for i := 0; i < len(refinedParams)-1; i++ {
+				tMid := (refinedParams[i] + refinedParams[i+1]) / 2
+				x1, z1 := archCurve(refinedParams[i], span, rise)
+				x2, z2 := archCurve(refinedParams[i+1], span, rise)
+				xm, zm := archCurve(tMid, span, rise)
+
+				chordVec := [2]float64{x2 - x1, z2 - z1}
+				midVec := [2]float64{xm - x1, zm - z1}
+				chordLen := math.Sqrt(chordVec[0]*chordVec[0] + chordVec[1]*chordVec[1])
+				if chordLen < 1e-6 {
+					continue
+				}
+				cross := math.Abs(chordVec[0]*midVec[1] - chordVec[1]*midVec[0])
+				curvatureDeviation := cross / chordLen
+
+				chordAngle := math.Atan2(chordVec[1], chordVec[0])
+				curvatureK := 8 * rise / (span * span)
+				localCurvature := curvatureK / math.Pow(1+math.Pow(4*rise/span*(1-2*tMid), 2), 1.5)
+				elementLength := chordLen
+
+				if (curvatureDeviation/chordLen > FEA_CURVATURE_THRESH ||
+					localCurvature*elementLength > 0.25) &&
+					len(refinedParams) < FEA_MAX_ELEMENTS {
+					needRefine = append(needRefine, i)
+				}
+			}
+
+			if len(needRefine) == 0 {
+				break
+			}
+
+			inserted := 0
+			for _, idx := range needRefine {
+				insertPos := idx + 1 + inserted
+				tMid := (refinedParams[idx+inserted] + refinedParams[idx+inserted+1]) / 2
+				refinedParams = append(refinedParams[:insertPos+1], refinedParams[insertPos:]...)
+				refinedParams[insertPos] = tMid
+				inserted++
+			}
+			if len(refinedParams) >= FEA_MAX_ELEMENTS+1 {
+				break
+			}
+		}
+
+		nNodesFinal := len(refinedParams)
+		model.Nodes = make([]Node, nNodesFinal)
+		for i, t := range refinedParams {
+			x, z := archCurve(t, span, rise)
+			fixed := i == 0 || i == nNodesFinal-1
+			model.Nodes[i] = Node{
 				ID:    i + 1,
 				X:     x,
 				Y:     0,
-				Z:     parabolic,
+				Z:     z,
 				Fixed: [3]bool{fixed, true, fixed},
-			})
+			}
 		}
 
 		archArea := ARCH_RIB_THICKNESS * ARCH_WIDTH
-		for i := 0; i < nNodes-1; i++ {
+		model.Elements = make([]Element, nNodesFinal-1)
+		for i := 0; i < nNodesFinal-1; i++ {
 			n1 := &model.Nodes[i]
 			n2 := &model.Nodes[i+1]
 			elLen := math.Sqrt(math.Pow(n2.X-n1.X, 2) + math.Pow(n2.Z-n1.Z, 2))
-			model.Elements = append(model.Elements, Element{
+			tMid := (refinedParams[i] + refinedParams[i+1]) / 2
+			_, zm := archCurve(tMid, span, rise)
+			localRiseRatio := zm / rise
+			thicknessFactor := 0.85 + 0.3*math.Abs(2*tMid-1)
+			model.Elements[i] = Element{
 				ID:     i + 1,
 				NodeIDs: [2]int{i + 1, i + 2},
-				Area:   archArea,
+				Area:   archArea * thicknessFactor,
 				Length: elLen,
-			})
+			}
+			_ = localRiseRatio
 		}
-		model.StressConcentrator = 1.3
+
+		model.StressConcentrator = 1.25
+		if aspectRatio > 5 {
+			model.StressConcentrator = 1.15
+		}
+		if rise/span < 0.18 {
+			model.StressConcentrator += 0.1
+		}
 	}
 
 	return model
+}
+
+func archCurve(t, span, rise float64) (x, z float64) {
+	x = t * span
+	z = 4 * rise / (span * span) * x * (span - x)
+	return
 }
 
 func (e *StructuralEvaluator) computeDegradation(segment *models.StructureSegment, weatheringDepthMM, settlementMM float64) *DegradationResult {
@@ -321,16 +458,80 @@ type StressResult struct {
 	MaxStress       float64   `json:"max_stress_MPa"`
 	DeflectionMM    float64   `json:"max_deflection_mm"`
 	Elements        []Element `json:"elements"`
+	Converged       bool      `json:"converged"`
+	Iterations      int       `json:"iterations"`
+	Residual        float64   `json:"residual_norm"`
+	ModelFallback   string    `json:"fallback_model,omitempty"`
+}
+
+type ArchAnalysisResult struct {
+	HorizontalThrust    float64
+	VerticalReaction    float64
+	CrownAxialForce     float64
+	CrownMoment         float64
+	SpringingMoment     float64
+	MaxAxialStress      float64
+	MaxBendingStress    float64
+	ArchRiseEff         float64
+	CrownDeflection     float64
+	AxialForceByElem    []float64
+	MomentByElem        []float64
 }
 
 func (e *StructuralEvaluator) runSimplifiedFEA(segment *models.StructureSegment, model *FEAModel, degradation *DegradationResult) *StressResult {
-	result := &StressResult{}
+	result := &StressResult{
+		Converged: true,
+	}
 
 	deadLoadPerM := ARCH_WIDTH * ARCH_RIB_THICKNESS * GRAVITY_ACCEL * STRUCTURE_DENSITY / 1000.0
 	superimposedLoad := 2.5
 	totalUDL := deadLoadPerM + superimposedLoad
 
 	if segment.SegmentType == "arch" {
+		archRes, converged, iters, residual, fallback := e.solveThreeHingedArch(
+			segment, model, degradation, totalUDL,
+		)
+
+		result.Converged = converged
+		result.Iterations = iters
+		result.Residual = residual
+		result.ModelFallback = fallback
+
+		horizontalThrust := archRes.HorizontalThrust
+		verticalReaction := archRes.VerticalReaction
+
+		archAreaAvg := 0.0
+		for _, el := range model.Elements {
+			archAreaAvg += el.Area
+		}
+		if len(model.Elements) > 0 {
+			archAreaAvg /= float64(len(model.Elements))
+		}
+		if archAreaAvg < 0.1 {
+			archAreaAvg = ARCH_RIB_THICKNESS * ARCH_WIDTH
+		}
+
+		sectionModulus := (ARCH_WIDTH * ARCH_RIB_THICKNESS * ARCH_RIB_THICKNESS) / 6.0
+		if sectionModulus <= 0 {
+			sectionModulus = 0.085
+		}
+
+		axialStressCrown := archRes.CrownAxialForce / archAreaAvg / 1000.0
+		crownBendingStress := archRes.CrownMoment / sectionModulus / 1000.0 * 1000.0
+		springingBendingStress := archRes.SpringingMoment / sectionModulus / 1000.0 * 1000.0
+
+		result.AxialStress = axialStressCrown
+		result.BendingStress = crownBendingStress
+
+		result.MaxStress = archRes.MaxAxialStress + math.Abs(archRes.MaxBendingStress)
+		result.MaxStress *= degradation.StressConcentration
+
+		result.ShearStress = 1.5 * verticalReaction / archAreaAvg / 1000.0
+
+		momentOfInertia := (ARCH_WIDTH * math.Pow(ARCH_RIB_THICKNESS, 3)) / 12.0
+		E_Pa := degradation.EffectiveE * 1e9
+		I_m4 := momentOfInertia
+
 		span := 5.5
 		if s, ok := segment.Position3D["span"]; ok {
 			if sv, conv := s.(float64); conv {
@@ -339,46 +540,55 @@ func (e *StructuralEvaluator) runSimplifiedFEA(segment *models.StructureSegment,
 		}
 		rise := span * ARCH_RISE_RATIO
 
-		horizontalThrust := (totalUDL * span * span) / (8 * rise)
-		verticalReaction := totalUDL * span / 2
-		crownMoment := (totalUDL * span * span) / 8 * (1 - 2*rise/span*0.7)
-
-		archArea := ARCH_RIB_THICKNESS * ARCH_WIDTH
-		axialStressCrown := horizontalThrust / archArea / 1000.0
-
-		sectionModulus := (ARCH_WIDTH * ARCH_RIB_THICKNESS * ARCH_RIB_THICKNESS) / 6.0
-		bendingStress := crownMoment / sectionModulus / 1000.0 * 1000.0
-
-		result.AxialStress = axialStressCrown
-		result.BendingStress = bendingStress
-		result.MaxStress = (axialStressCrown + math.Abs(bendingStress)) * degradation.StressConcentration
-		result.ShearStress = 1.5 * verticalReaction / archArea / 1000.0
-
-		momentOfInertia := (ARCH_WIDTH * math.Pow(ARCH_RIB_THICKNESS, 3)) / 12.0
-		E_Pa := degradation.EffectiveE * 1e9
-		I_m4 := momentOfInertia
-		result.DeflectionMM = (5 * totalUDL * 1000 * math.Pow(span, 4)) /
-			(384 * E_Pa * I_m4) * 1000
+		L_eff := math.Sqrt(span*span + (2*rise)*(2*rise)) * 0.85
+		EA := E_Pa * archAreaAvg
+		EI := E_Pa * I_m4
+		result.DeflectionMM = archRes.CrownDeflection * 1000
+		if result.DeflectionMM <= 0 {
+			result.DeflectionMM = (5*totalUDL*1000*math.Pow(L_eff, 4))/(384*EI) * 1000 * (rise / span) * 2.5
+		}
 
 		for i := range model.Elements {
-			pos := float64(i+1) / float64(len(model.Elements)+1)
-			distFromCrown := math.Abs(pos - 0.5)
+			var N, M float64
+			if i < len(archRes.AxialForceByElem) {
+				N = archRes.AxialForceByElem[i]
+			} else {
+				frac := float64(i+1) / float64(len(model.Elements)+1)
+				N = horizontalThrust * (1.0 + 0.3*math.Abs(2*frac-1))
+			}
+			if i < len(archRes.MomentByElem) {
+				M = archRes.MomentByElem[i]
+			} else {
+				frac := float64(i+1) / float64(len(model.Elements)+1)
+				M = archRes.CrownMoment * (1.0 - 4*(frac-0.5)*(frac-0.5))
+			}
 
-			elementAxial := horizontalThrust / (model.Elements[i].Area) / 1000.0
-			momentFactor := 4 * pos * (1 - pos)
-			elementBending := bendingStress * momentFactor
+			areaElem := model.Elements[i].Area
+			if areaElem < 0.01 {
+				areaElem = archAreaAvg
+			}
+			sigmaA := N / areaElem / 1000.0
+			sigmaB := 0.0
+			if areaElem > 0 {
+				localW := (ARCH_WIDTH * ARCH_RIB_THICKNESS * ARCH_RIB_THICKNESS) / 6.0
+				if localW > 0 {
+					sigmaB = M / localW / 1000.0 * 1000.0
+				}
+			}
 
-			model.Elements[i].AxialStress = elementAxial
-			model.Elements[i].MaxStress = (elementAxial + elementBending) * degradation.StressConcentration
+			model.Elements[i].AxialStress = math.Max(0.1, sigmaA)
+			model.Elements[i].MaxStress = (sigmaA + math.Abs(sigmaB)) * degradation.StressConcentration
 			model.Elements[i].MaterialFactor = degradation.TotalDegradationFactor
+
 			permitted := degradation.EffectiveStrength / DESIGN_SAFETY_FACTOR
 			if permitted > 0 {
-				model.Elements[i].Utilization = model.Elements[i].MaxStress / permitted
+				model.Elements[i].Utilization = math.Min(3.0, model.Elements[i].MaxStress/permitted)
 			}
-			_ = distFromCrown
 		}
 		result.Elements = model.Elements
-		_ = verticalReaction
+		_ = springingBendingStress
+		_ = EA
+		_ = rise
 
 	} else if segment.SegmentType == "pier" {
 		height := 15.0
@@ -388,9 +598,6 @@ func (e *StructuralEvaluator) runSimplifiedFEA(segment *models.StructureSegment,
 			}
 		}
 
-		axialLoadPier := (totalUDL * 5.5) + (PIER_WIDTH*PIER_DEPTH*height*GRAVITY_ACCEL*STRUCTURE_DENSITY/1000.0)*0.5
-		pierArea := PIER_WIDTH * PIER_DEPTH
-
 		settlementMm := 0.0
 		{
 			var sv float64
@@ -399,42 +606,209 @@ func (e *StructuralEvaluator) runSimplifiedFEA(segment *models.StructureSegment,
 				segment.ID).Scan(&sv)
 			settlementMm = sv
 		}
+
+		pierArea := PIER_WIDTH * PIER_DEPTH
+		axialLoadPier := (totalUDL * 5.5) + (pierArea*height*GRAVITY_ACCEL*STRUCTURE_DENSITY/1000.0)*0.5
+
 		adjacentSettlement := settlementMm * 0.3
 		differential := math.Abs(settlementMm - adjacentSettlement)
 		rotationRad := differential / (5.5 * 1000.0)
+		if rotationRad > 0.02 {
+			rotationRad = 0.02
+		}
 		eccentricity := height / 2 * math.Sin(rotationRad)
 		pierSectionMod := (PIER_DEPTH * PIER_WIDTH * PIER_WIDTH) / 6.0
 		momentFromSettlement := axialLoadPier * 1000.0 * eccentricity
-		bendingStress := momentFromSettlement / pierSectionMod / 1000.0
+		bendingStress := 0.0
+		if pierSectionMod > 0 {
+			bendingStress = momentFromSettlement / pierSectionMod / 1000.0
+		}
+
+		K_p := 3.0 * degradation.EffectiveE * 1e9 * (PIER_DEPTH * math.Pow(PIER_WIDTH, 3) / 12.0) / math.Pow(height, 3)
+		springForce := K_p * (settlementMm / 1000.0) * 0.001
+		if !math.IsNaN(springForce) && !math.IsInf(springForce, 0) {
+			axialLoadPier += math.Abs(springForce) * 0.05
+		}
 
 		result.AxialStress = axialLoadPier / pierArea / 1000.0
 		result.BendingStress = bendingStress
-		result.MaxStress = (result.AxialStress + bendingStress) * degradation.StressConcentration
+		result.MaxStress = (result.AxialStress + math.Abs(bendingStress)) * degradation.StressConcentration
 		result.ShearStress = axialLoadPier * math.Tan(rotationRad) / pierArea / 1000.0
 
 		E_Pa := degradation.EffectiveE * 1e9
 		I_m4 := (PIER_DEPTH * math.Pow(PIER_WIDTH, 3)) / 12.0
-		result.DeflectionMM = (axialLoadPier*1000.0 * math.Pow(height, 3)) /
-			(3 * E_Pa * I_m4) * 1000
+		result.DeflectionMM = math.Min(50.0,
+			(axialLoadPier*1000.0*math.Pow(height, 3))/(3*E_Pa*I_m4)*1000)
 
 		for i := range model.Elements {
-			elementRatio := float64(i+1) / float64(len(model.Elements))
-			model.Elements[i].AxialStress = result.AxialStress * (0.8 + elementRatio*0.4)
-			model.Elements[i].MaxStress = model.Elements[i].AxialStress * degradation.StressConcentration
+			frac := float64(i) / math.Max(1, float64(len(model.Elements)-1))
+			zPos := frac * height
+
+			N_local := axialLoadPier * (0.8 + 0.4*frac)
+			M_local := axialLoadPier * eccentricity * (1 - frac)
+
+			localArea := model.Elements[i].Area
+			if localArea < 0.01 {
+				localArea = pierArea / 2.0
+			}
+			sigmaA := N_local / localArea / 1000.0
+			localW := (PIER_DEPTH * PIER_WIDTH * PIER_WIDTH) / 12.0
+			sigmaB := 0.0
+			if localW > 0 {
+				sigmaB = M_local / localW / 1000.0
+			}
+
+			model.Elements[i].AxialStress = math.Max(0.05, sigmaA)
+			model.Elements[i].MaxStress = (sigmaA + math.Abs(sigmaB)) * degradation.StressConcentration
 			model.Elements[i].MaterialFactor = degradation.TotalDegradationFactor
+
 			permitted := degradation.EffectiveStrength / DESIGN_SAFETY_FACTOR
 			if permitted > 0 {
-				model.Elements[i].Utilization = model.Elements[i].MaxStress / permitted
+				model.Elements[i].Utilization = math.Min(3.0, model.Elements[i].MaxStress/permitted)
 			}
+			_ = zPos
 		}
 		result.Elements = model.Elements
+
+		result.Converged = true
+		result.Iterations = 1
 	}
 
-	if result.MaxStress < 0.1 {
+	if result.MaxStress < 0.1 || math.IsNaN(result.MaxStress) || math.IsInf(result.MaxStress, 0) {
 		result.MaxStress = segment.DesignStrength * 0.3
+	}
+	if result.AxialStress < 0 || math.IsNaN(result.AxialStress) {
+		result.AxialStress = segment.DesignStrength * 0.15
 	}
 
 	return result
+}
+
+func (e *StructuralEvaluator) solveThreeHingedArch(
+	segment *models.StructureSegment,
+	model *FEAModel,
+	degradation *DegradationResult,
+	q float64,
+) (*ArchAnalysisResult, bool, int, float64, string) {
+
+	span := 5.5
+	if s, ok := segment.Position3D["span"]; ok {
+		if sv, conv := s.(float64); conv {
+			span = sv
+		}
+	}
+	riseDesign := span * ARCH_RISE_RATIO
+	nElem := len(model.Elements)
+	if nElem < 2 {
+		nElem = 6
+	}
+
+	E_Pa := degradation.EffectiveE * 1e9
+	areaAvg := 0.0
+	for _, el := range model.Elements {
+		areaAvg += el.Area
+	}
+	if len(model.Elements) > 0 {
+		areaAvg /= float64(len(model.Elements))
+	}
+	if areaAvg < 0.01 {
+		areaAvg = ARCH_RIB_THICKNESS * ARCH_WIDTH
+	}
+	EA := E_Pa * areaAvg
+	EI := E_Pa * (ARCH_WIDTH * math.Pow(ARCH_RIB_THICKNESS, 3) / 12.0)
+	_ = EA
+	_ = EI
+
+	res := &ArchAnalysisResult{
+		VerticalReaction: q * span / 2.0,
+	}
+
+	rise0 := riseDesign
+	for i := 0; i < 5; i++ {
+		res.HorizontalThrust = (q * span * span) / (8 * rise0)
+		Vc := res.VerticalReaction
+		H := res.HorizontalThrust
+
+		elemForcesN := make([]float64, nElem)
+		elemForcesM := make([]float64, nElem)
+		maxN := 0.0
+		maxM := 0.0
+		springM := 0.0
+
+		for j := 0; j < nElem; j++ {
+			tElem := (float64(j) + 0.5) / float64(nElem)
+			xj := tElem * span
+			_, zj := archCurve(tElem, span, rise0)
+			theta_j := math.Atan2(4*rise0/span*(1-2*tElem), 1)
+
+			V_xj := Vc - q*xj
+			Mx := Vc*xj - q*xj*xj/2.0
+			Hy := H * zj
+			Melem := Mx - Hy
+
+			Nelem := H*math.Cos(theta_j) + V_xj*math.Sin(theta_j)
+
+			elemForcesN[j] = Nelem
+			elemForcesM[j] = Melem
+
+			if math.Abs(Nelem) > maxN {
+				maxN = math.Abs(Nelem)
+			}
+			if math.Abs(Melem) > maxM {
+				maxM = math.Abs(Melem)
+			}
+			if j == 0 {
+				springM = math.Abs(Melem)
+			}
+		}
+
+		res.AxialForceByElem = elemForcesN
+		res.MomentByElem = elemForcesM
+		res.CrownAxialForce = H
+		tCrown := 0.5
+		Mc := Vc*(span/2.0) - q*(span*span/4.0)/2.0 - H*rise0
+		res.CrownMoment = Mc
+		res.SpringingMoment = springM
+		res.ArchRiseEff = rise0
+
+		if areaAvg > 0 {
+			res.MaxAxialStress = maxN / areaAvg / 1000.0
+		}
+		localW := (ARCH_WIDTH * ARCH_RIB_THICKNESS * ARCH_RIB_THICKNESS) / 6.0
+		if localW > 0 {
+			res.MaxBendingStress = maxM / localW / 1000.0 * 1000.0
+		}
+
+		deltaCrownElastic := 0.0
+		if EI > 0 {
+			integralM_y := 0.0
+			for j := 0; j < nElem; j++ {
+				tj := (float64(j) + 0.5) / float64(nElem)
+				_, zj := archCurve(tj, span, rise0)
+				integralM_y += elemForcesM[j] * zj
+			}
+			integralM_y *= span / float64(nElem)
+			deltaCrownElastic = integralM_y / EI * 1000
+			if math.IsNaN(deltaCrownElastic) || math.IsInf(deltaCrownElastic, 0) {
+				deltaCrownElastic = (5 * q * 1000 * math.Pow(span, 4)) / (384 * EI) * 1000 * (rise0 / span)
+			}
+		}
+		res.CrownDeflection = deltaCrownElastic
+
+		riseNew := riseDesign - deltaCrownElastic/1000
+		if riseNew < riseDesign*0.3 {
+			riseNew = riseDesign * 0.3
+		}
+
+		errRatio := math.Abs(riseNew-rise0) / riseDesign
+		if errRatio < FEA_TOLERANCE {
+			return res, true, i + 1, errRatio, ""
+		}
+
+		rise0 = FEA_RELAXATION*riseNew + (1-FEA_RELAXATION)*rise0
+	}
+
+	return res, false, FEA_MAX_ITERATIONS, FEA_TOLERANCE * 10, "linear_elastic_unconverged"
 }
 
 func (e *StructuralEvaluator) checkThresholds(

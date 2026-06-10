@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { LOD } from 'three';
 
 const viz = {
   scene: null,
@@ -10,6 +11,7 @@ const viz = {
   mouse: new THREE.Vector2(),
   segments: new Map(),
   segmentMeshes: [],
+  lodObjects: [],
   selectedId: null,
   hoveredId: null,
   colorMode: 'weathering',
@@ -20,6 +22,68 @@ const viz = {
   hudEl: null,
   onSegmentClick: null,
 
+  isMobile: false,
+  isLowPower: false,
+  devicePixelRatioSafe: 1,
+  lodLevel: 'high',
+  progressiveLoading: true,
+  loadingProgress: 0,
+  buildBudgetMs: 8,
+  detailLevel: {
+    archSegments: 24,
+    archTessellation: 10,
+    voussoirCount: 0,
+    stoneTextureSize: 256,
+    shadowMapSize: 2048,
+    antialias: true,
+  },
+
+  detectDevice() {
+    const ua = navigator.userAgent || '';
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const md = w <= 768 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobi/i.test(ua);
+    this.isMobile = md;
+    this.isLowPower = md || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4) ||
+      (navigator.deviceMemory && navigator.deviceMemory <= 2);
+    this.devicePixelRatioSafe = Math.min(window.devicePixelRatio || 1, this.isLowPower ? 1.5 : 2);
+    if (this.isLowPower) {
+      this.lodLevel = 'low';
+      this.detailLevel = {
+        archSegments: 10,
+        archTessellation: 5,
+        voussoirCount: 0,
+        stoneTextureSize: 128,
+        shadowMapSize: 512,
+        antialias: false,
+      };
+    } else if (this.isMobile) {
+      this.lodLevel = 'medium';
+      this.detailLevel = {
+        archSegments: 16,
+        archTessellation: 7,
+        voussoirCount: Math.floor(8 / 2),
+        stoneTextureSize: 128,
+        shadowMapSize: 1024,
+        antialias: w >= 768,
+      };
+    } else {
+      this.lodLevel = 'high';
+      this.detailLevel = {
+        archSegments: 24,
+        archTessellation: 10,
+        voussoirCount: 0,
+        stoneTextureSize: 256,
+        shadowMapSize: 2048,
+        antialias: true,
+      };
+    }
+    if (this.detailLevel.voussoirCount === 0) {
+      this.detailLevel.voussoirCount = this.lodLevel === 'high' ? -1 : 4;
+    }
+    console.log(`[viz] Device: mobile=${this.isMobile}, lowPower=${this.isLowPower}, lod=${this.lodLevel}, dpr=${this.devicePixelRatioSafe}`);
+  },
+
   init(canvasId, onSegmentClick) {
     this.canvas = document.getElementById(canvasId);
     this.tooltipEl = document.getElementById('viewerTooltip');
@@ -27,26 +91,32 @@ const viz = {
     this.minimapCanvas = document.getElementById('minimapCanvas');
     this.onSegmentClick = onSegmentClick;
 
+    this.detectDevice();
+
     const rect = this.canvas.parentElement.getBoundingClientRect();
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x0f1a25);
-    this.scene.fog = new THREE.Fog(0x0f1a25, 80, 350);
+    this.scene.fog = new THREE.Fog(0x0f1a25, 80, this.isLowPower ? 220 : 350);
 
     this.camera = new THREE.PerspectiveCamera(45, rect.width / rect.height, 0.1, 1000);
     this.camera.position.set(55, 40, 65);
 
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvas,
-      antialias: true,
-      alpha: false
+      antialias: this.detailLevel.antialias,
+      alpha: false,
+      powerPreference: this.isLowPower ? 'low-power' : 'high-performance'
     });
-    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setPixelRatio(this.devicePixelRatioSafe);
     this.renderer.setSize(rect.width, rect.height);
-    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.enabled = !this.isLowPower;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    if (this.renderer.capabilities.isWebGL2 === false) {
+      this.renderer.shadowMap.enabled = false;
+    }
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
+    this.controls.enableDamping = !this.isLowPower;
     this.controls.dampingFactor = 0.08;
     this.controls.minDistance = 8;
     this.controls.maxDistance = 250;
@@ -69,8 +139,9 @@ const viz = {
 
     const sun = new THREE.DirectionalLight(0xffe4b5, 1.2);
     sun.position.set(40, 70, 30);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    sun.castShadow = !this.isLowPower;
+    const smSize = this.detailLevel.shadowMapSize;
+    sun.shadow.mapSize.set(smSize, smSize);
     sun.shadow.camera.near = 1;
     sun.shadow.camera.far = 200;
     sun.shadow.camera.left = -100;
@@ -79,11 +150,13 @@ const viz = {
     sun.shadow.camera.bottom = -100;
     this.scene.add(sun);
 
-    const fill = new THREE.DirectionalLight(0x87ceeb, 0.35);
-    fill.position.set(-40, 30, -30);
-    this.scene.add(fill);
+    if (!this.isLowPower) {
+      const fill = new THREE.DirectionalLight(0x87ceeb, 0.35);
+      fill.position.set(-40, 30, -30);
+      this.scene.add(fill);
+    }
 
-    const ambient = new THREE.AmbientLight(0x404050, 0.3);
+    const ambient = new THREE.AmbientLight(0x404050, this.isLowPower ? 0.45 : 0.3);
     this.scene.add(ambient);
   },
 
@@ -142,6 +215,13 @@ const viz = {
   },
 
   clearAqueduct() {
+    this.lodObjects.forEach(lod => {
+      lod.levels.forEach(l => {
+        if (l.object && l.object.geometry) l.object.geometry.dispose();
+      });
+    });
+    this.lodObjects = [];
+
     this.segmentMeshes.forEach(m => {
       this.scene.remove(m);
       if (m.geometry) m.geometry.dispose();
@@ -154,9 +234,19 @@ const viz = {
     this.segments.clear();
     this.selectedId = null;
     this.hoveredId = null;
+    this.loadingProgress = 0;
   },
 
-  buildAqueduct(aqueduct, segments) {
+  updateLoadingProgress(done, total) {
+    this.loadingProgress = done / total;
+    const el = document.getElementById('loadingProgress');
+    if (el) {
+      el.style.width = (this.loadingProgress * 100).toFixed(0) + '%';
+      el.parentElement.style.opacity = this.loadingProgress >= 1 ? '0' : '1';
+    }
+  },
+
+  async buildAqueduct(aqueduct, segments) {
     this.clearAqueduct();
 
     const arches = segments.filter(s => s.segment_type === 'arch');
@@ -166,33 +256,114 @@ const viz = {
     const span = 6.0;
     const baseX = -((pierCount - 1) * span) / 2;
 
-    piers.forEach((pier, idx) => {
+    const total = piers.length + arches.length + 1;
+    let done = 0;
+
+    const pierProxy = this.isMobile ? this.createPierProxy : null;
+
+    for (let idx = 0; idx < piers.length; idx++) {
+      const pier = piers[idx];
       const posX = baseX + idx * span;
       const height = pier.position_3d?.height || 15 + Math.random() * 10;
-      const mesh = this.createPierMesh(pier, posX, 0, 0, height);
+
+      let mesh;
+      if (pierProxy && idx % 2 === 0 && this.progressiveLoading) {
+        mesh = pierProxy.call(this, pier, posX, 0, 0, height);
+      } else {
+        mesh = this.createPierMesh(pier, posX, 0, 0, height);
+      }
       mesh.userData = { id: pier.id, segment: pier };
       this.segmentMeshes.push(mesh);
       this.segments.set(pier.id, { mesh, data: pier });
       this.scene.add(mesh);
-    });
 
-    arches.forEach((arch, idx) => {
+      done++;
+      if (this.progressiveLoading && (idx % 5 === 4 || idx === piers.length - 1)) {
+        this.updateLoadingProgress(done, total);
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+
+    for (let idx = 0; idx < arches.length; idx++) {
+      const arch = arches[idx];
       const posX = baseX + idx * span + span / 2;
       const height = (piers[idx]?.position_3d?.height || 18) - 3;
-      const mesh = this.createArchMesh(arch, posX, height, 0, span, span * 0.25);
+      const mesh = this.createArchMeshLOD(arch, posX, height, 0, span, span * 0.25);
       mesh.userData = { id: arch.id, segment: arch };
       this.segmentMeshes.push(mesh);
       this.segments.set(arch.id, { mesh, data: arch });
       this.scene.add(mesh);
-    });
+
+      done++;
+      if (this.progressiveLoading && (idx % 5 === 4 || idx === arches.length - 1)) {
+        this.updateLoadingProgress(done, total);
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
 
     const topLength = (pierCount - 1) * span;
     const topHeight = (piers[0]?.position_3d?.height || 18) + 2;
     const channel = this.createChannelMesh(baseX + topLength / 2, topHeight, 0, topLength);
     this.scene.add(channel);
 
+    done++;
+    this.updateLoadingProgress(done, total);
+
+    if (this.progressiveLoading && pierProxy) {
+      setTimeout(() => this.enhancePierDetails(piers, baseX, span), 800);
+    }
+
     this.applyColorMode();
     this.zoomToFit();
+  },
+
+  enhancePierDetails(piers, baseX, span) {
+    if (!piers || piers.length === 0) return;
+    for (let idx = 0; idx < piers.length; idx++) {
+      if (idx % 2 !== 0) continue;
+      const pier = piers[idx];
+      const existing = this.segments.get(pier.id);
+      if (!existing || !existing.mesh.userData.isProxy) continue;
+      const posX = baseX + idx * span;
+      const height = pier.position_3d?.height || 15 + Math.random() * 10;
+      const newMesh = this.createPierMesh(pier, posX, 0, 0, height);
+      newMesh.userData = { id: pier.id, segment: pier };
+      this.scene.remove(existing.mesh);
+      existing.mesh.traverse(o => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) {
+          if (Array.isArray(o.material)) o.material.forEach(m => m.dispose());
+          else o.material.dispose();
+        }
+      });
+      const i = this.segmentMeshes.indexOf(existing.mesh);
+      if (i >= 0) this.segmentMeshes[i] = newMesh;
+      existing.mesh = newMesh;
+      this.scene.add(newMesh);
+    }
+    this.applyColorMode();
+  },
+
+  createPierProxy(segment, x, y, z, height) {
+    const group = new THREE.Group();
+    const width = 1.2, depth = 2.5;
+    const geo = new THREE.BoxGeometry(width, height, depth);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x8a8070,
+      roughness: 0.9,
+      metalness: 0.03,
+      wireframe: this.wireframe
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.y = height / 2;
+    mesh.castShadow = !this.isLowPower;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    group.position.set(x, y, z);
+    group.userData = segment;
+    group.traverse(obj => { if (obj.isMesh) obj.userData = { id: segment.id, segment }; });
+    group.userData.isProxy = true;
+    return group;
   },
 
   createPierMesh(segment, x, y, z, height) {
@@ -239,11 +410,72 @@ const viz = {
     return group;
   },
 
-  createArchMesh(segment, x, y, z, span, rise) {
+  createArchMeshLOD(segment, x, y, z, span, rise) {
+    if (!this.isMobile && !this.isLowPower) {
+      return this.createArchMesh(segment, x, y, z, span, rise, 'high');
+    }
+
+    const lod = new LOD();
+
+    const hi = this.createArchMesh(segment, x, y, z, span, rise, 'high');
+    hi.visible = false;
+    const hiGroup = new THREE.Group();
+    hiGroup.add(...hi.children);
+    hiGroup.position.copy(hi.position);
+    lod.addLevel(hiGroup, 0);
+
+    const me = this.createArchMesh(segment, x, y, z, span, rise, 'medium');
+    const meGroup = new THREE.Group();
+    meGroup.add(...me.children);
+    meGroup.position.copy(me.position);
+    lod.addLevel(meGroup, 45);
+
+    const lo = this.createArchMesh(segment, x, y, z, span, rise, 'low');
+    const loGroup = new THREE.Group();
+    loGroup.add(...lo.children);
+    loGroup.position.copy(lo.position);
+    lod.addLevel(loGroup, 120);
+
+    lod.position.set(x, y, z);
+
+    const wrap = new THREE.Group();
+    wrap.add(lod);
+    wrap.userData = segment;
+    wrap.position.set(x, y, z);
+
+    wrap.traverse(obj => {
+      if (obj.isMesh) {
+        obj.userData = { id: segment.id, segment };
+        this.segmentMeshes.push(obj);
+      }
+    });
+    lod.traverse(obj => {
+      if (obj.isMesh) obj.userData = { id: segment.id, segment };
+    });
+
+    lod.userData = segment;
+    wrap.userData = { id: segment.id, segment, lod };
+    this.lodObjects.push(lod);
+
+    const dummy = new THREE.Group();
+    dummy.position.set(x, y, z);
+    dummy.userData = { id: segment.id, segment, lod, lodWrap: wrap };
+    dummy.add(lod);
+
+    return dummy;
+  },
+
+  createArchMesh(segment, x, y, z, span, rise, quality) {
     const group = new THREE.Group();
+    const q = quality || this.lodLevel;
+
+    let segCount = this.detailLevel.archSegments;
+    let tess = this.detailLevel.archTessellation;
+    let voussoirLim = this.detailLevel.voussoirCount;
+    if (q === 'low') { segCount = 8; tess = 4; voussoirLim = 0; }
+    else if (q === 'medium') { segCount = 14; tess = 6; voussoirLim = 4; }
 
     const curvePts = [];
-    const segCount = 24;
     for (let i = 0; i <= segCount; i++) {
       const t = i / segCount;
       const px = -span / 2 + t * span;
@@ -255,45 +487,58 @@ const viz = {
     const ribThickness = 0.8;
     const archWidth = 3.0;
 
-    const archGeo = new THREE.TubeGeometry(curve, 48, ribThickness / 2, 10, false);
+    const tubeSegs = Math.max(8, segCount * 2);
+    const archGeo = new THREE.TubeGeometry(curve, q === 'low' ? Math.floor(tubeSegs / 2) : tubeSegs,
+      ribThickness / 2, tess, false);
     const archScale = new THREE.Vector3(1, 1, archWidth / ribThickness * 0.8);
     archGeo.scale(archScale.x, archScale.y, archScale.z);
     const archMat = this.createStoneMaterial(segment);
     const archTube = new THREE.Mesh(archGeo, archMat);
-    archTube.castShadow = true;
+    archTube.castShadow = q !== 'low';
     archTube.receiveShadow = true;
     group.add(archTube);
 
-    const stoneCount = Math.floor(span / 0.9);
-    for (let i = 0; i < stoneCount; i++) {
-      const t = (i + 0.5) / stoneCount;
-      const pos = curve.getPointAt(t);
-      const tangent = curve.getTangentAt(t).normalize();
-      const rotY = Math.atan2(tangent.x, tangent.z) + Math.PI / 2;
+    if (voussoirLim !== 0) {
+      let stoneCount = Math.floor(span / 0.9);
+      if (voussoirLim > 0) {
+        stoneCount = Math.min(stoneCount, voussoirLim);
+      }
+      for (let i = 0; i < stoneCount; i++) {
+        const t = (i + 0.5) / stoneCount;
+        const pos = curve.getPointAt(t);
+        const tangent = curve.getTangentAt(t).normalize();
 
-      const voussoirW = span / stoneCount * 0.95;
-      const voussoirGeo = new THREE.BoxGeometry(voussoirW, ribThickness * 0.9, archWidth * 0.85);
-      const voussoir = new THREE.Mesh(voussoirGeo, archMat.clone());
-      voussoir.position.copy(pos);
-      voussoir.position.y += rise / 4;
-      voussoir.rotation.z = -Math.atan2(tangent.x, Math.sqrt(1 - tangent.x * tangent.x)) * 0.8;
-      voussoir.castShadow = true;
-      voussoir.receiveShadow = true;
-      group.add(voussoir);
+        const voussoirW = span / stoneCount * 0.95;
+        const wDiv = q === 'low' ? 1 : 2;
+        const hDiv = q === 'low' ? 1 : 2;
+        const dDiv = q === 'low' ? 1 : 2;
+        const voussoirGeo = new THREE.BoxGeometry(voussoirW, ribThickness * 0.9, archWidth * 0.85,
+          wDiv, hDiv, dDiv);
+        const voussoir = new THREE.Mesh(voussoirGeo, archMat.clone());
+        voussoir.position.copy(pos);
+        voussoir.position.y += rise / 4;
+        voussoir.rotation.z = -Math.atan2(tangent.x, Math.sqrt(1 - tangent.x * tangent.x)) * 0.8;
+        voussoir.castShadow = q !== 'low';
+        voussoir.receiveShadow = true;
+        group.add(voussoir);
+      }
     }
 
-    const keystoneGeo = new THREE.BoxGeometry(0.7, ribThickness * 1.2, archWidth * 0.95);
-    const keystone = new THREE.Mesh(keystoneGeo, archMat.clone());
-    keystone.position.set(0, rise + 0.3, 0);
-    keystone.castShadow = true;
-    keystone.receiveShadow = true;
-    group.add(keystone);
+    if (q !== 'low') {
+      const ksDiv = q === 'medium' ? 1 : 2;
+      const keystoneGeo = new THREE.BoxGeometry(0.7, ribThickness * 1.2, archWidth * 0.95, ksDiv, ksDiv, ksDiv);
+      const keystone = new THREE.Mesh(keystoneGeo, archMat.clone());
+      keystone.position.set(0, rise + 0.3, 0);
+      keystone.castShadow = q !== 'low';
+      keystone.receiveShadow = true;
+      group.add(keystone);
+    }
 
     group.position.set(x, y, z);
     group.userData = segment;
     group.traverse(obj => { if (obj.isMesh) obj.userData = { id: segment.id, segment }; });
 
-    this.addStoneTexture(group);
+    if (q === 'high') this.addStoneTexture(group);
     return group;
   },
 
@@ -369,51 +614,63 @@ const viz = {
   },
 
   createStoneMaterial(segment) {
+    const texSize = this.detailLevel.stoneTextureSize;
     const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = 256;
+    canvas.width = canvas.height = texSize;
     const ctx = canvas.getContext('2d');
 
     ctx.fillStyle = '#8a8070';
-    ctx.fillRect(0, 0, 256, 256);
+    ctx.fillRect(0, 0, texSize, texSize);
 
+    const spotCount = Math.floor(400 * (texSize / 256));
     const baseColors = ['#7a6f5e', '#857a68', '#968a76', '#6f6555'];
-    for (let i = 0; i < 400; i++) {
+    for (let i = 0; i < spotCount; i++) {
       ctx.fillStyle = baseColors[Math.floor(Math.random() * baseColors.length)];
       ctx.globalAlpha = 0.15 + Math.random() * 0.35;
-      const x = Math.random() * 256, y = Math.random() * 256;
-      const r = 3 + Math.random() * 20;
+      const x = Math.random() * texSize, y = Math.random() * texSize;
+      const r = 3 + Math.random() * (20 * texSize / 256);
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
 
-    ctx.strokeStyle = 'rgba(50, 40, 30, 0.25)';
-    ctx.lineWidth = 1;
-    for (let x = 0; x < 256; x += 42) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 256); ctx.stroke();
-    }
-    for (let y = 0; y < 256; y += 36) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y); ctx.stroke();
-    }
+    if (texSize >= 192) {
+      ctx.strokeStyle = 'rgba(50, 40, 30, 0.25)';
+      ctx.lineWidth = 1;
+      const gapX = Math.floor(42 * texSize / 256);
+      const gapY = Math.floor(36 * texSize / 256);
+      for (let x = 0; x < texSize; x += gapX) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, texSize); ctx.stroke();
+      }
+      for (let y = 0; y < texSize; y += gapY) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(texSize, y); ctx.stroke();
+      }
 
-    for (let i = 0; i < 50; i++) {
-      ctx.strokeStyle = `rgba(100, 80, 60, ${0.05 + Math.random() * 0.15})`;
-      ctx.lineWidth = 0.5;
-      const sx = Math.random() * 256, sy = Math.random() * 256;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(sx + (Math.random() - 0.5) * 30, sy + (Math.random() - 0.5) * 30);
-      ctx.stroke();
+      const crackCount = Math.floor(50 * texSize / 256);
+      for (let i = 0; i < crackCount; i++) {
+        ctx.strokeStyle = `rgba(100, 80, 60, ${0.05 + Math.random() * 0.15})`;
+        ctx.lineWidth = 0.5;
+        const sx = Math.random() * texSize, sy = Math.random() * texSize;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(sx + (Math.random() - 0.5) * (30 * texSize / 256), sy + (Math.random() - 0.5) * (30 * texSize / 256));
+        ctx.stroke();
+      }
     }
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     tex.repeat.set(1.5, 1);
+    if (this.detailLevel.stoneTextureSize <= 128) {
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.generateMipmaps = false;
+    }
 
     return new THREE.MeshStandardMaterial({
       map: tex,
-      roughness: 0.85,
+      roughness: this.isLowPower ? 1.0 : 0.85,
       metalness: 0.04,
       color: 0xffffff,
       wireframe: this.wireframe
@@ -763,6 +1020,13 @@ const viz = {
   animate() {
     requestAnimationFrame(() => this.animate());
     this.controls.update();
+
+    if (this.lodObjects.length > 0 && this.camera) {
+      for (let i = 0; i < this.lodObjects.length; i++) {
+        this.lodObjects[i].update(this.camera);
+      }
+    }
+
     this.renderer.render(this.scene, this.camera);
   }
 };

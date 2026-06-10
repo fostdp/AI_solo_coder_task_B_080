@@ -64,6 +64,11 @@
     <div class="view-container">
       <div class="viewer-3d" id="viewer3d">
         <canvas id="sceneCanvas"></canvas>
+        <div class="loading-overlay" id="loadingOverlay">
+          <div class="loading-spinner"></div>
+          <div class="loading-bar"><div class="loading-fill" id="loadingProgress" style="width:0%"></div></div>
+          <div class="loading-text">加载三维模型中...</div>
+        </div>
         <div class="viewer-controls">
           <button class="ctrl-btn" onclick="viz.resetView()" title="重置视角">🎯</button>
           <button class="ctrl-btn" onclick="viz.toggleWireframe()" title="线框模式">📐</button>
