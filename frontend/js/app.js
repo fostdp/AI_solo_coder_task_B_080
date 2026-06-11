@@ -634,6 +634,19 @@ ${rec.construction_notes || '根据结构特点制定详细施工方案'}
     this.state.currentTab = name;
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
     document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === `tab-${name}`));
+    try {
+      const seg = this.state.currentSegment;
+      const aq = this.state.currentAqueduct;
+      if (name === 'inversion' && window.featureViz) {
+        featureViz.renderInversionPanel('inversionPanel', seg);
+      } else if (name === 'seismic' && window.featureViz) {
+        featureViz.renderSeismicPanel('seismicPanel', aq, seg);
+      } else if (name === 'lifetime' && window.featureViz) {
+        featureViz.renderLifetimePanel('lifetimePanel', seg);
+      } else if (name === 'tourism' && window.featureViz) {
+        featureViz.renderTourismPanel('tourismPanel', this.state.aqueducts);
+      }
+    } catch (e) { console.warn(e); }
   },
 
   async refresh(silent) {

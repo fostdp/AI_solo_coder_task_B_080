@@ -17,15 +17,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/robfig/cron/v3"
 
+	"aqueduct-monitor/aqueduct_comparator"
 	"aqueduct-monitor/config"
 	"aqueduct-monitor/database"
+	"aqueduct-monitor/durability_inverter"
 	"aqueduct-monitor/evaluation"
 	"aqueduct-monitor/handlers"
+	"aqueduct-monitor/material_predictor"
 	"aqueduct-monitor/metrics"
 	"aqueduct-monitor/mqtt"
 	"aqueduct-monitor/pipeline"
 	"aqueduct-monitor/recommendation"
 	"aqueduct-monitor/repository"
+	"aqueduct-monitor/seismic_fragility"
 )
 
 func main() {
@@ -46,6 +50,22 @@ func main() {
 
 	evaluator := evaluation.NewStructuralEvaluator(repo, cfg)
 	recommender := recommendation.NewRepairRecommender(repo)
+
+	var inverterService *durability_inverter.InverterService
+	if cfg.Inversion.UseRemoteService {
+		inverterService = durability_inverter.NewInverterServiceWithRemote(repo, cfg, cfg.Inversion.RemoteServiceURL)
+		log.Printf("Using remote inversion service at %s", cfg.Inversion.RemoteServiceURL)
+	} else {
+		inverterService = durability_inverter.NewInverterService(repo, cfg)
+	}
+	seismicService := seismic_fragility.NewFragilityService(repo, cfg)
+	predictorService := material_predictor.NewPredictorService(repo, cfg)
+	comparatorService := aqueduct_comparator.NewComparatorService(repo, cfg)
+
+	inverterHandler := durability_inverter.NewInverterHandler(inverterService)
+	seismicHandler := seismic_fragility.NewFragilityHandler(seismicService)
+	predictorHandler := material_predictor.NewPredictorHandler(predictorService)
+	comparatorHandler := aqueduct_comparator.NewComparatorHandler(comparatorService)
 
 	mqttClient, err := mqtt.NewAlertPublisher(&cfg.MQTT, repo)
 	if err != nil {
@@ -146,6 +166,11 @@ func main() {
 		api.GET("/materials", h.GetRepairMaterials)
 
 		api.POST("/evaluation/run", h.RunFullEvaluation)
+
+		inverterHandler.RegisterRoutes(api)
+		seismicHandler.RegisterRoutes(api)
+		predictorHandler.RegisterRoutes(api)
+		comparatorHandler.RegisterRoutes(api)
 	}
 
 	r.GET("/", func(c *gin.Context) {
@@ -207,6 +232,32 @@ func main() {
 		log.Println("    GET  /api/stats               - 综合统计")
 		log.Println("    GET  /api/materials           - 修复材料库")
 		log.Println("    POST /api/evaluation/run      - 触发全量评估")
+		log.Println()
+		log.Println("  === 模块化 Feature API ===")
+		log.Println("  【durability_inverter - 耐久性反演】")
+		log.Println("    POST /api/inversion/invert         - 混凝土配比反演")
+		log.Println("    GET  /api/inversion/formulas       - 古罗马配方库")
+		log.Println("    GET  /api/inversion/aqueducts/:id  - 水道反演历史")
+		log.Println("  【seismic_fragility - 地震易损性】")
+		log.Println("    GET  /api/seismic/earthquakes/historical - 历史地震数据")
+		log.Println("    GET  /api/seismic/risks            - 全水道地震风险地图")
+		log.Println("    POST /api/seismic/analyze/:id      - 水道地震风险分析")
+		log.Println("    POST /api/seismic/ida/:id          - 增量动力分析")
+		log.Println("    POST /api/seismic/ida/batch        - 批量IDA(支持异步)")
+		log.Println("    GET  /api/seismic/ida/jobs/:id     - IDA任务状态")
+		log.Println("    GET  /api/seismic/fragility-curves/:id - 段易损性曲线")
+		log.Println("    GET  /api/seismic/vulnerability/:id - 段地震脆弱度")
+		log.Println("  【material_predictor - 材料预测】")
+		log.Println("    POST /api/material-predictor/predict   - 修复材料寿命预测")
+		log.Println("    POST /api/material-predictor/calibrate - 活化能校准")
+		log.Println("    GET  /api/material-predictor/segments/:id - 段预测历史")
+		log.Println("    GET  /api/material-predictor/aqueducts/:id - 水道预测历史")
+		log.Println("  【aqueduct_comparator - 水道对比】")
+		log.Println("    POST /api/aqueduct-comparator/compare   - 多水道对比分析")
+		log.Println("    POST /api/aqueduct-comparator/tourism-plan - 旅游规划推荐")
+		log.Println("    GET  /api/aqueduct-comparator/tourism/:id - 水道旅游数据")
+		log.Println("    GET  /api/aqueduct-comparator/comparisons - 历史对比记录")
+		log.Println("    GET  /api/aqueduct-comparator/radar/:ids - 雷达图数据")
 		log.Println()
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

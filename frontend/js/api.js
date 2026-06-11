@@ -36,7 +36,32 @@ const api = {
   },
   async getStats() { return (await this.get("/stats")).data; },
   async getMaterials() { return (await this.get("/materials")).data; },
-  async runFullEvaluation() { return this.post("/evaluation/run"); }
+  async runFullEvaluation() { return this.post("/evaluation/run"); },
+
+  // Feature 1: 古罗马混凝土耐久性反演
+  async invertConcrete(payload) { return (await this.post("/inversion/invert", payload)).data; },
+  async getConcreteFormulas() { return (await this.get("/inversion/formulas")).data; },
+  async getAqueductInversions(aqueductId) { return (await this.get(`/inversion/aqueducts/${aqueductId}`)).data; },
+
+  // Feature 2: 地震易损性评估
+  async getHistoricalEarthquakes() { return (await this.get("/seismic/earthquakes")).data; },
+  async analyzeSeismicRisk(aqueductId) { return (await this.get(`/seismic/risks/${aqueductId}`)).data; },
+  async getAllSeismicRisks() { return (await this.get("/seismic/risks")).data; },
+  async getFragilityCurve(segmentId) { return (await this.get(`/seismic/fragility/${segmentId}`)).data; },
+  async analyzeIDA(segmentId) { return (await this.get(`/seismic/ida/${segmentId}`)).data; },
+
+  // Feature 3: 修复材料长期性能预测
+  async predictMaterialLifetime(payload) { return (await this.post("/lifetime/predict", payload)).data; },
+  async getMaterialPredictions(materialId) { return (await this.get(`/lifetime/materials/${materialId}`)).data; },
+
+  // Feature 4: 多水道对比与旅游规划
+  async compareAqueducts(aqueductIds) {
+    return (await this.post("/tourism/compare", { aqueduct_ids: aqueductIds || [], save_result: false })).data;
+  },
+  async getRecentComparisons(limit) {
+    const qs = limit ? `?limit=${limit}` : "";
+    return (await this.get(`/tourism/comparisons${qs}`)).data;
+  }
 };
 
 const fmt = {

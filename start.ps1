@@ -66,6 +66,22 @@ if ($tsdbOk) {
 }
 
 # ---------------------------------------------------------------------------
+Step "Step 2b/6: 执行 Feature SQL 初始化"
+try {
+    $featureSqlPath = Join-Path $ScriptDir "database\features.sql"
+    if (Test-Path $featureSqlPath) {
+        docker exec -i aqueduct-timescaledb psql -U postgres -d aqueduct_monitor -c "SELECT 1" 2>$null
+        $sqlContent = Get-Content $featureSqlPath -Raw
+        $sqlContent | docker exec -i aqueduct-timescaledb psql -U postgres -d aqueduct_monitor 2>$null | Out-Null
+        Success "Feature SQL 执行完成 (ON CONFLICT DO NOTHING)"
+    } else {
+        Warn "Feature SQL 文件不存在: $featureSqlPath"
+    }
+} catch {
+    Warn "Feature SQL 执行警告 (不影响运行，将使用内存默认数据): $_"
+}
+
+# ---------------------------------------------------------------------------
 Step "Step 3/6: 安装 Go 后端依赖"
 Set-Location backend
 try {

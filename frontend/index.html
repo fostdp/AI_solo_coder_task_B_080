@@ -84,10 +84,16 @@
       </div>
 
       <aside class="right-panel">
-        <div class="tabs">
+        <div class="tabs" id="mainTabs">
           <button class="tab-btn active" data-tab="detail" onclick="app.switchTab('detail')">📊 详情</button>
           <button class="tab-btn" data-tab="repair" onclick="app.switchTab('repair')">🔧 修复推荐</button>
           <button class="tab-btn" data-tab="alerts" onclick="app.switchTab('alerts')">🚨 告警 <span id="alertBadge" class="badge">0</span></button>
+        </div>
+        <div class="tabs feature-tabs">
+          <button class="tab-btn" data-tab="inversion" onclick="app.switchTab('inversion')">🏺 混凝土反演</button>
+          <button class="tab-btn" data-tab="seismic" onclick="app.switchTab('seismic')">🌋 地震风险</button>
+          <button class="tab-btn" data-tab="lifetime" onclick="app.switchTab('lifetime')">⏳ 寿命预测</button>
+          <button class="tab-btn" data-tab="tourism" onclick="app.switchTab('tourism')">🎯 旅游对比</button>
         </div>
 
         <div class="tab-content active" id="tab-detail">
@@ -99,6 +105,18 @@
         <div class="tab-content" id="tab-alerts">
           <div id="alertsPanel" class="panel"></div>
         </div>
+        <div class="tab-content" id="tab-inversion">
+          <div id="inversionPanel" class="panel"></div>
+        </div>
+        <div class="tab-content" id="tab-seismic">
+          <div id="seismicPanel" class="panel"></div>
+        </div>
+        <div class="tab-content" id="tab-lifetime">
+          <div id="lifetimePanel" class="panel"></div>
+        </div>
+        <div class="tab-content" id="tab-tourism">
+          <div id="tourismPanel" class="panel"></div>
+        </div>
       </aside>
     </div>
   </main>
@@ -107,6 +125,11 @@
 <div id="toastContainer" class="toast-container"></div>
 
 <script src="js/api.js"></script>
+<script src="components/durability_inverter/inverter.js"></script>
+<script src="components/seismic_fragility/fragility.js"></script>
+<script src="components/material_predictor/predictor.js"></script>
+<script src="components/aqueduct_comparator/comparator.js"></script>
+<script src="js/feature_viz.js"></script>
 <script src="js/viz.js" type="module"></script>
 <script src="js/app.js"></script>
 </body>
