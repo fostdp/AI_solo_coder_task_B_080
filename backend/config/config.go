@@ -103,8 +103,6 @@ type InversionConfig struct {
 	NoiseRobustWeight         float64
 	OutlierRejectionThreshold float64
 	MaxIterations             int
-	UseRemoteService          bool
-	RemoteServiceURL          string
 }
 
 type SeismicConfig struct {
@@ -263,8 +261,6 @@ func Load() *Config {
 			NoiseRobustWeight:         getEnvFloat("INV_NOISE_WEIGHT", 0.6),
 			OutlierRejectionThreshold: getEnvFloat("INV_OUTLIER_THRESH", 2.5),
 			MaxIterations:             getEnvInt("INV_MAX_ITER", 50),
-			UseRemoteService:          getEnvBool("INV_USE_REMOTE", false),
-			RemoteServiceURL:          getEnv("INV_REMOTE_URL", "http://localhost:8081"),
 		},
 		Seismic: SeismicConfig{
 			MagnitudeMin:          getEnvFloat("SEIS_MAG_MIN", 4.0),

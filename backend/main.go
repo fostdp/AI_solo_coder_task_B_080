@@ -17,19 +17,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/robfig/cron/v3"
 
-	"aqueduct-monitor/aqueduct_comparator"
 	"aqueduct-monitor/config"
 	"aqueduct-monitor/database"
-	"aqueduct-monitor/durability_inverter"
 	"aqueduct-monitor/evaluation"
 	"aqueduct-monitor/handlers"
-	"aqueduct-monitor/material_predictor"
+	"aqueduct-monitor/inversion"
+	"aqueduct-monitor/lifetime"
 	"aqueduct-monitor/metrics"
 	"aqueduct-monitor/mqtt"
 	"aqueduct-monitor/pipeline"
 	"aqueduct-monitor/recommendation"
 	"aqueduct-monitor/repository"
-	"aqueduct-monitor/seismic_fragility"
+	"aqueduct-monitor/seismic"
+	"aqueduct-monitor/tourism"
 )
 
 func main() {
@@ -51,21 +51,10 @@ func main() {
 	evaluator := evaluation.NewStructuralEvaluator(repo, cfg)
 	recommender := recommendation.NewRepairRecommender(repo)
 
-	var inverterService *durability_inverter.InverterService
-	if cfg.Inversion.UseRemoteService {
-		inverterService = durability_inverter.NewInverterServiceWithRemote(repo, cfg, cfg.Inversion.RemoteServiceURL)
-		log.Printf("Using remote inversion service at %s", cfg.Inversion.RemoteServiceURL)
-	} else {
-		inverterService = durability_inverter.NewInverterService(repo, cfg)
-	}
-	seismicService := seismic_fragility.NewFragilityService(repo, cfg)
-	predictorService := material_predictor.NewPredictorService(repo, cfg)
-	comparatorService := aqueduct_comparator.NewComparatorService(repo, cfg)
-
-	inverterHandler := durability_inverter.NewInverterHandler(inverterService)
-	seismicHandler := seismic_fragility.NewFragilityHandler(seismicService)
-	predictorHandler := material_predictor.NewPredictorHandler(predictorService)
-	comparatorHandler := aqueduct_comparator.NewComparatorHandler(comparatorService)
+	inverter := inversion.NewConcreteInverter(repo, cfg)
+	seismicAnalyzer := seismic.NewVulnerabilityAnalyzer(repo, cfg)
+	lifePredictor := lifetime.NewLifetimePredictor(repo, cfg)
+	tourismPlanner := tourism.NewTourismPlanner(repo, cfg)
 
 	mqttClient, err := mqtt.NewAlertPublisher(&cfg.MQTT, repo)
 	if err != nil {
@@ -94,6 +83,7 @@ func main() {
 	}()
 
 	h := handlers.New(repo, cfg, evaluator, recommender, mqttClient, pipe, appMetrics)
+	fh := handlers.NewFeatureHandlers(h, inverter, seismicAnalyzer, lifePredictor, tourismPlanner)
 
 	r := gin.New()
 	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
@@ -167,10 +157,33 @@ func main() {
 
 		api.POST("/evaluation/run", h.RunFullEvaluation)
 
-		inverterHandler.RegisterRoutes(api)
-		seismicHandler.RegisterRoutes(api)
-		predictorHandler.RegisterRoutes(api)
-		comparatorHandler.RegisterRoutes(api)
+		// ============================================
+		// Feature 1: 古罗马混凝土耐久性反演
+		// ============================================
+		api.POST("/inversion/invert", fh.InvertConcrete)
+		api.GET("/inversion/formulas", fh.GetFormulas)
+		api.GET("/inversion/aqueducts/:aqueduct_id", fh.GetAqueductInversionResults)
+
+		// ============================================
+		// Feature 2: 地震易损性评估
+		// ============================================
+		api.GET("/seismic/earthquakes", fh.GetHistoricalEarthquakes)
+		api.GET("/seismic/risks/:aqueduct_id", fh.AnalyzeSeismicRisk)
+		api.GET("/seismic/risks", fh.GetAllSeismicRisks)
+		api.GET("/seismic/fragility/:segment_id", fh.GetFragilityCurve)
+		api.GET("/seismic/ida/:segment_id", fh.AnalyzeIncrementalDynamic)
+
+		// ============================================
+		// Feature 3: 修复材料长期性能预测
+		// ============================================
+		api.POST("/lifetime/predict", fh.PredictMaterialLifetime)
+		api.GET("/lifetime/materials/:material_id", fh.GetMaterialPredictions)
+
+		// ============================================
+		// Feature 4: 多水道对比与旅游规划
+		// ============================================
+		api.POST("/tourism/compare", fh.CompareAqueducts)
+		api.GET("/tourism/comparisons", fh.GetRecentComparisons)
 	}
 
 	r.GET("/", func(c *gin.Context) {
@@ -233,31 +246,23 @@ func main() {
 		log.Println("    GET  /api/materials           - 修复材料库")
 		log.Println("    POST /api/evaluation/run      - 触发全量评估")
 		log.Println()
-		log.Println("  === 模块化 Feature API ===")
-		log.Println("  【durability_inverter - 耐久性反演】")
+		log.Println("  === 新增Feature API ===")
+		log.Println("  【古罗马混凝土反演】")
 		log.Println("    POST /api/inversion/invert         - 混凝土配比反演")
 		log.Println("    GET  /api/inversion/formulas       - 古罗马配方库")
 		log.Println("    GET  /api/inversion/aqueducts/:id  - 水道反演历史")
-		log.Println("  【seismic_fragility - 地震易损性】")
-		log.Println("    GET  /api/seismic/earthquakes/historical - 历史地震数据")
+		log.Println("  【地震易损性】")
+		log.Println("    GET  /api/seismic/earthquakes      - 历史地震数据")
+		log.Println("    GET  /api/seismic/risks/:id        - 水道地震风险分析")
 		log.Println("    GET  /api/seismic/risks            - 全水道地震风险地图")
-		log.Println("    POST /api/seismic/analyze/:id      - 水道地震风险分析")
-		log.Println("    POST /api/seismic/ida/:id          - 增量动力分析")
-		log.Println("    POST /api/seismic/ida/batch        - 批量IDA(支持异步)")
-		log.Println("    GET  /api/seismic/ida/jobs/:id     - IDA任务状态")
-		log.Println("    GET  /api/seismic/fragility-curves/:id - 段易损性曲线")
-		log.Println("    GET  /api/seismic/vulnerability/:id - 段地震脆弱度")
-		log.Println("  【material_predictor - 材料预测】")
-		log.Println("    POST /api/material-predictor/predict   - 修复材料寿命预测")
-		log.Println("    POST /api/material-predictor/calibrate - 活化能校准")
-		log.Println("    GET  /api/material-predictor/segments/:id - 段预测历史")
-		log.Println("    GET  /api/material-predictor/aqueducts/:id - 水道预测历史")
-		log.Println("  【aqueduct_comparator - 水道对比】")
-		log.Println("    POST /api/aqueduct-comparator/compare   - 多水道对比分析")
-		log.Println("    POST /api/aqueduct-comparator/tourism-plan - 旅游规划推荐")
-		log.Println("    GET  /api/aqueduct-comparator/tourism/:id - 水道旅游数据")
-		log.Println("    GET  /api/aqueduct-comparator/comparisons - 历史对比记录")
-		log.Println("    GET  /api/aqueduct-comparator/radar/:ids - 雷达图数据")
+		log.Println("    GET  /api/seismic/fragility/:id    - 段易损性曲线")
+		log.Println("    GET  /api/seismic/ida/:id          - 增量动力分析")
+		log.Println("  【长期性能预测】")
+		log.Println("    POST /api/lifetime/predict         - 修复材料寿命预测")
+		log.Println("    GET  /api/lifetime/materials/:id   - 材料预测历史")
+		log.Println("  【旅游规划对比】")
+		log.Println("    POST /api/tourism/compare          - 多水道对比分析")
+		log.Println("    GET  /api/tourism/comparisons      - 历史对比记录")
 		log.Println()
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
