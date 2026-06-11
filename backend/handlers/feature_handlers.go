@@ -163,6 +163,129 @@ type FragilityRequest struct {
 	SegmentID string `json:"segment_id" binding:"required"`
 }
 
+func (fh *FeatureHandlers) SubmitIDATask(c *gin.Context) {
+	segIDStr := c.Param("segment_id")
+	segID, err := uuid.Parse(segIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid segment id"})
+		return
+	}
+	ctx := context.Background()
+	taskID, err := fh.seismic.SubmitIDATask(ctx, segID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, models.SuccessResponse{
+		Status: "submitted",
+		Data:   map[string]interface{}{"task_id": taskID.String()},
+	})
+}
+
+func (fh *FeatureHandlers) GetIDATaskStatus(c *gin.Context) {
+	taskIDStr := c.Param("task_id")
+	taskID, err := uuid.Parse(taskIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid task id"})
+		return
+	}
+	ctx := context.Background()
+	taskInfo, err := fh.seismic.GetIDATaskStatus(ctx, taskID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	if taskInfo == nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "task not found", Code: http.StatusNotFound})
+		return
+	}
+	c.JSON(http.StatusOK, models.SuccessResponse{Status: "success", Data: taskInfo})
+}
+
+func (fh *FeatureHandlers) GetIDATaskResult(c *gin.Context) {
+	taskIDStr := c.Param("task_id")
+	taskID, err := uuid.Parse(taskIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid task id"})
+		return
+	}
+	ctx := context.Background()
+	results, errTask, ready := fh.seismic.GetIDATaskResult(ctx, taskID)
+	if !ready {
+		c.JSON(http.StatusAccepted, models.SuccessResponse{
+			Status: "pending",
+			Data:   map[string]interface{}{"ready": false},
+		})
+		return
+	}
+	if errTask != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: errTask.Error()})
+		return
+	}
+	for i := range results {
+		_ = fh.handler.repo.InsertSeismicVulnerability(ctx, &results[i])
+	}
+	c.JSON(http.StatusOK, models.SuccessResponse{
+		Status: "success",
+		Data:   results,
+		Count:  len(results),
+	})
+}
+
+func (fh *FeatureHandlers) ListIDATasks(c *gin.Context) {
+	ctx := context.Background()
+	tasks, err := fh.seismic.ListIDATasks(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, models.SuccessResponse{
+		Status: "success",
+		Data:   tasks,
+		Count:  len(tasks),
+	})
+}
+
+type BatchIDARequest struct {
+	SegmentIDs []string `json:"segment_ids" binding:"required"`
+}
+
+func (fh *FeatureHandlers) SubmitBatchIDATasks(c *gin.Context) {
+	var req BatchIDARequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "invalid_request",
+			Message: err.Error(),
+			Code:    http.StatusBadRequest,
+		})
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(req.SegmentIDs))
+	for _, s := range req.SegmentIDs {
+		if id, e := uuid.Parse(s); e == nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "no valid segment ids"})
+		return
+	}
+	ctx := context.Background()
+	batchID, taskIDs, err := fh.seismic.SubmitBatchIDATasks(ctx, ids)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, models.SuccessResponse{
+		Status: "submitted",
+		Data: map[string]interface{}{
+			"batch_id":   batchID.String(),
+			"task_ids":   taskIDs,
+			"task_count": len(taskIDs),
+		},
+	})
+}
+
 func (fh *FeatureHandlers) GetFragilityCurve(c *gin.Context) {
 	segIDStr := c.Param("segment_id")
 	segID, err := uuid.Parse(segIDStr)

@@ -56,6 +56,8 @@ func main() {
 	lifePredictor := lifetime.NewLifetimePredictor(repo, cfg)
 	tourismPlanner := tourism.NewTourismPlanner(repo, cfg)
 
+	seismicAnalyzer.StartIDATaskManager()
+
 	mqttClient, err := mqtt.NewAlertPublisher(&cfg.MQTT, repo)
 	if err != nil {
 		log.Printf("Warning: MQTT initialization issue: %v", err)
@@ -172,6 +174,11 @@ func main() {
 		api.GET("/seismic/risks", fh.GetAllSeismicRisks)
 		api.GET("/seismic/fragility/:segment_id", fh.GetFragilityCurve)
 		api.GET("/seismic/ida/:segment_id", fh.AnalyzeIncrementalDynamic)
+		api.POST("/seismic/ida/:segment_id/async", fh.SubmitIDATask)
+		api.GET("/seismic/ida/tasks", fh.ListIDATasks)
+		api.GET("/seismic/ida/tasks/:task_id", fh.GetIDATaskStatus)
+		api.GET("/seismic/ida/tasks/:task_id/result", fh.GetIDATaskResult)
+		api.POST("/seismic/ida/batch", fh.SubmitBatchIDATasks)
 
 		// ============================================
 		// Feature 3: 修复材料长期性能预测
@@ -257,6 +264,11 @@ func main() {
 		log.Println("    GET  /api/seismic/risks            - 全水道地震风险地图")
 		log.Println("    GET  /api/seismic/fragility/:id    - 段易损性曲线")
 		log.Println("    GET  /api/seismic/ida/:id          - 增量动力分析")
+		log.Println("    POST /api/seismic/ida/:id/async    - 提交异步IDA任务")
+		log.Println("    GET  /api/seismic/ida/tasks        - 列出所有IDA任务")
+		log.Println("    GET  /api/seismic/ida/tasks/:id    - 获取IDA任务状态")
+		log.Println("    GET  /api/seismic/ida/tasks/:id/result - 获取IDA任务结果")
+		log.Println("    POST /api/seismic/ida/batch        - 批量提交IDA任务")
 		log.Println("  【长期性能预测】")
 		log.Println("    POST /api/lifetime/predict         - 修复材料寿命预测")
 		log.Println("    GET  /api/lifetime/materials/:id   - 材料预测历史")
@@ -274,6 +286,8 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 	log.Printf("\nReceived signal: %v. Shutting down gracefully...", sig)
+
+	seismicAnalyzer.StopIDATaskManager()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

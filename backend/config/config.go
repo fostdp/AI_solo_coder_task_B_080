@@ -121,6 +121,7 @@ type SeismicConfig struct {
 	BetaUncertaintyMax       float64
 	UseLiquefactionCheck     bool
 	SoilTypePrior            map[string]float64
+	IDAWorkerCount           int
 }
 
 type LifetimeConfig struct {
@@ -285,6 +286,7 @@ func Load() *Config {
 			SoilTypePrior: map[string]float64{
 				"A": 0.05, "B": 0.30, "C": 0.40, "D": 0.20, "E": 0.05,
 			},
+			IDAWorkerCount: getEnvInt("SEIS_IDA_WORKERS", 2),
 		},
 		Lifetime: LifetimeConfig{
 			ArrheniusActivationEV:       getEnvFloat("LIFE_ACT_EV", 0.95),
